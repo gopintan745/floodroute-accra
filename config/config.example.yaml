@@ -1,0 +1,36 @@
+# Copy this file to config.yaml and fill in real values.
+# config.yaml is gitignored — config.example.yaml is the tracked template.
+
+study_area:
+  name: "TODO: e.g. Circle-Kaneshie corridor"
+  # Bounding box in (south, west, north, east) — decimal degrees
+  bbox: [5.55, -0.25, 5.60, -0.18]
+
+data_sources:
+  osm:
+    network_type: "drive"   # passed to osmnx.graph_from_bbox
+  dem:
+    provider: "copernicus"  # or "srtm"
+  rainfall:
+    provider: "chirps"      # or "gpm"
+  traffic:
+    google_maps_api_key: "TODO"
+    sample_interval_minutes: 60
+    sample_days: 14
+
+env:
+  max_episode_steps: 200
+  flood_penalty: 50          # minutes-equivalent penalty for hitting a flooded edge
+  step_penalty: 0.1          # small per-step penalty to discourage wandering
+  reveal_radius_hops: 1      # how many hops ahead the agent can "see" conditions
+
+training:
+  dqn:
+    total_timesteps: 200000
+  ppo:
+    total_timesteps: 1000000
+    n_envs: 4
+
+evaluation:
+  num_scenarios: 100
+  seed: 42
