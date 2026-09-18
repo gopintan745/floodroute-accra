@@ -90,7 +90,7 @@ Realistic, **feasible**: a bounded sub-region (e.g., one district, or a corridor
 ## 5. Phased Roadmap (no fixed dates — sequenced checkpoints)
 
 1. **Environment groundwork:** Pull the OSM road graph for one bounded sub-region via OSMnx; clean and verify it manually against satellite imagery.
-2. **Hazard layers:** Build a flood-risk layer from DEM + rainfall data; build a synthetic/sampled traffic layer (start synthetic, add real Google API samples opportunistically).
+2. **Hazard layers:** Build a flood-risk layer from DEM + rainfall data; build a synthetic/sampled traffic layer (start synthetic, add real Mapbox Directions API data samples opportunistically).
 3. **Baseline first:** Implement Dijkstra/A* with (a) static weights and (b) dynamically-updated weights, *before* touching RL. This gives you a working, demoable artifact early and a concrete comparison target.
 4. **Custom Gymnasium environment:** Encode the MDP from Section 3. Validate it with a trivial random-action agent and a greedy-heuristic agent before training anything real.
 5. **Agent training, smallest-first:** Start with tabular Q-learning or DQN on a small subgraph to validate the reward design cheaply, then move to PPO (discrete action head) on the full sub-region graph, per the reasoning from our earlier discussion on discrete vs. continuous actor-critic methods.
