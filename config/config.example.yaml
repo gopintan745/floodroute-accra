@@ -13,7 +13,9 @@ data_sources:
     provider: "opentopography"
     demtype: "COP30"  # or "SRTMGL1"
   rainfall:
-    provider: "chirps"      # or "gpm"
+    provider: "open-meteo"  # Open-Meteo Historical Weather API (free, no key)
+    start_date: "2015-01-01"
+    end_date: null  # null = default to yesterday (Open-Meteo requires end_date)
   traffic:
     provider: "mapbox"
     mapbox_access_token: "TODO"  # set in .env or here

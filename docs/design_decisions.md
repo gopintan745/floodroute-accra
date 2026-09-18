@@ -113,6 +113,80 @@ Final risk per cell ∈ [0, 1], then sampled along road edges (mean of points ev
 
 - If we move to a workflow system (Airflow, Prefect) where separation is handled differently
 
+## 2026-09-18 — Rainfall source: Open-Meteo Historical Weather API (point time series)
+
+**Decision:** Use Open-Meteo's free Historical Weather (archive) API for daily precipitation at the study area centroid. No API key required. Returns ERA5-reanalysis daily time series (one point, not a raster).
+
+**Alternatives considered:**
+
+- CHIRPS (satellite, 0.05° grid, daily) — requires NetCDF download, more complex
+- NASA GPM (satellite, 0.1° grid, half-hourly) — similar complexity
+- Ghana Meteorological Agency ground stations — not programmatically accessible
+
+**Why this one:**
+
+- Free, no authentication, simple REST API
+- Study area is small (~3km across) — a single centroid point is representative
+- ERA5 reanalysis is high-quality for this region
+- Returns daily time series directly; easy to aggregate (mean, max, percentile) for flood-risk heuristic
+- Date range configurable in config.yaml
+
+**Important constraint:** Open-Meteo REQUIRES both start_date AND end_date. If end_date is omitted, it returns "Bad Request". The script now defaults end_date to yesterday (most recent available archive day) when null in config.
+
+**What would change my mind:**
+
+- If spatial variation in rainfall across the bbox proves significant (e.g., orographic effects)
+- If a gridded satellite product (CHIRPS/GPM) becomes easier to integrate programmatically
+- If we need sub-daily rainfall resolution for flash-flood modeling
+
+## 2026-09-18 — Open-Meteo rainfall processing: 95th percentile → uniform risk field
+
+**Decision:** For the flood-risk heuristic, compute the 95th percentile of daily precipitation from the Open-Meteo time series, normalize via sigmoid around 50mm/day, and broadcast as a uniform field across the DEM grid.
+
+**Alternatives considered:**
+
+- Mean daily precipitation — too low, under-represents flood-triggering extremes
+- Max daily precipitation — too noisy, single outlier dominates
+- Multiple points across bbox — API doesn't support multi-point; could make N calls but study area is small
+- Temporal aggregation by season — adds complexity, not needed for v1 heuristic
+
+**Why this one:**
+
+- 95th percentile is a standard "extreme event" metric in hydrology; captures heavy-rain tail without being a single outlier
+- Sigmoid normalization (50mm/day threshold, 20mm scale) gives smooth 0-1 risk gradient
+- Uniform field is intentional: for a ~3km bbox, spatial variation in daily rainfall is negligible compared to topographic variation
+- Keeps the pipeline simple: point time series → single scalar → uniform raster → same sampling logic as gridded products
+
+**What would change my mind:**
+
+- If validation shows rainfall varies significantly within the bbox (e.g., coastal vs inland)
+- If we switch to a gridded product (CHIRPS) — would then use the full spatial field
+- If flood-risk model needs temporal dynamics (e.g., antecedent moisture) — would need time dimension in risk layer
+
+## 2026-09-18 — Limitation: Open-Meteo point time series lacks spatial rainfall variation
+
+**Decision:** Document as a known limitation that using a single centroid point from Open-Meteo ERA5 reanalysis means the flood-risk layer has no spatial variation in the rainfall component — it's a uniform field across the entire DEM grid.
+
+**Why this matters:**
+
+- Real rainfall varies spatially even at ~3km scales (coastal vs inland, orographic effects, convective cell patterns)
+- The uniform assumption means flood risk differences across the study area come ONLY from topography (TWI + elevation)
+- This could miss flood-prone areas that are topographically moderate but receive higher rainfall
+- ERA5 reanalysis itself has ~30km native resolution — the point value is already interpolated from a coarse grid
+
+**Mitigations in current design:**
+
+- Topography weight (0.6) > rainfall weight (0.4) — persistent topographic risk dominates
+- For flash floods in this region, topography (low-lying areas, drainage paths) is often the primary driver
+- The study area is small (~3km); spatial rainfall gradients are typically secondary to topographic ones
+
+**What would change my mind / future improvements:*s*
+
+- If validation against historical flood extents shows systematic spatial bias
+- Switch to gridded product (CHIRPS 0.05° ≈ 5.5km, or IMERG 0.1° ≈ 11km) — would provide spatial variation
+- If we expand study area beyond ~5km radius — spatial rainfall variation becomes non-negligible
+- Could implement multi-point querying (N calls to Open-Meteo) to build a coarse spatial field
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):

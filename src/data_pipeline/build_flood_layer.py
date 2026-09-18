@@ -64,7 +64,7 @@ def find_dem_file(dem_dir: Path) -> Path | None:
 
 def find_rainfall_file(rainfall_dir: Path) -> Path | None:
     """Find a rainfall data file in the raw data directory."""
-    for ext in ["*.nc", "*.tif", "*.tiff", "*.hdf", "*.he5"]:
+    for ext in ["*.json", "*.nc", "*.tif", "*.tiff", "*.hdf", "*.he5"]:
         files = list(rainfall_dir.glob(ext))
         if files:
             return files[0]
@@ -173,11 +173,59 @@ def load_rainfall_data(rainfall_path: Path, bbox: tuple[float, float, float, flo
     """
     Load rainfall data and resample to match DEM grid.
 
-    Supports NetCDF (CHIRPS/GPM), GeoTIFF, and other raster formats.
+    Supports:
+    - JSON from Open-Meteo Historical Weather API (point time series)
+    - NetCDF (CHIRPS/GPM), GeoTIFF, and other raster formats
+
     Returns rainfall intensity normalized to 0-1.
     """
     south, west, north, east = bbox
 
+    # First, try to load as JSON (Open-Meteo format)
+    try:
+        import json
+        with open(rainfall_path) as f:
+            data = json.load(f)
+
+        # Check if it's Open-Meteo format
+        if "daily" in data and "precipitation_sum" in data.get("daily", {}):
+            precip = data["daily"]["precipitation_sum"]
+            times = data["daily"].get("time", [])
+
+            if not precip:
+                logger.warning("Open-Meteo data has no precipitation values, using synthetic")
+                return create_synthetic_rainfall(dem_shape)
+
+            # Convert to numpy array
+            precip_arr = np.array(precip, dtype=np.float32)
+            precip_arr = np.nan_to_num(precip_arr, nan=0.0)
+
+            # Design decision: Use 95th percentile of daily precipitation as the
+            # representative "heavy rain" intensity for this location.
+            # This captures extreme events better than mean, and is more stable than max.
+            # (See design_decisions.md for the single-point justification)
+            rep_precip_mm = float(np.percentile(precip_arr, 95))
+
+            logger.info(f"Open-Meteo rainfall: {len(precip_arr)} days, "
+                        f"95th percentile = {rep_precip_mm:.1f} mm/day")
+
+            # Normalize using sigmoid around 50mm/day flood threshold
+            flood_threshold_mm = 50.0
+            rain_norm = 1.0 / (1.0 + np.exp(-(rep_precip_mm - flood_threshold_mm) / 20.0))
+            rain_norm = np.clip(rain_norm, 0, 1)
+
+            # Open-Meteo gives a point time series, not a grid.
+            # Since the study area is small (~3km), create a uniform field.
+            # This is intentional per design decision: single centroid is representative.
+            return np.full(dem_shape, rain_norm, dtype=np.float32)
+
+    except json.JSONDecodeError:
+        # Not JSON, fall through to raster handling
+        pass
+    except Exception as e:
+        logger.warning(f"Failed to load Open-Meteo JSON: {e}")
+
+    # Try raster formats (NetCDF, GeoTIFF) using xarray/rasterio
     try:
         import xarray as xr
     except ImportError:
