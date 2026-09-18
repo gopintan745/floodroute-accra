@@ -29,8 +29,16 @@ conda activate floodroute-accra
 ```
 
 Copy `config/config.example.yaml` to `config/config.yaml` and fill in your
-study-area bounding box and any API keys. `config/config.yaml` is gitignored
-— never commit real API keys.
+study-area bounding box. `config/config.yaml` is gitignored — never commit
+real API keys.
+
+For traffic sampling, this project uses the **Mapbox Directions API**
+(`mapbox/driving-traffic` profile). Set your access token as an environment
+variable rather than in the config file:
+
+```bash
+export MAPBOX_ACCESS_TOKEN="pk.xxxx"
+```
 
 ## Project layout
 
