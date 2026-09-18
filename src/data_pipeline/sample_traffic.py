@@ -21,8 +21,11 @@ TODO:
 
 import requests  # noqa: F401
 
+def get_access_token() -> str:
+    """Get the Mapbox access token from the environment or config."""
+    raise NotImplementedError("TODO")
 
-def sample_once(segments: list, api_key: str) -> dict:
+def sample_once(segments: list) -> dict:
     """Query current traffic duration for a list of road segments. TODO."""
     raise NotImplementedError("TODO")
 
