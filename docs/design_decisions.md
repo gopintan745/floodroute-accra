@@ -40,11 +40,39 @@ for this bbox is too sparse/disconnected to be usable, or if the area
 turns out too small to have meaningfully different alternate routes for
 the RL agent to choose between.
 
+## 2026-09-18 — Flood risk computation from DEM + rainfall (heuristic proxy)
+
+**Decision:** Compute flood risk as a weighted combination of:
+
+1. **Topographic Wetness Index (TWI) proxy** (weight 0.6): A simplified TWI = ln(a/tan(β)) where specific catchment area `a` is approximated by inverse slope (flatter areas accumulate more water) and slope `β` is computed from DEM via Sobel filter. Combined with elevation percentile (lower = higher risk).
+2. **Rainfall intensity** (weight 0.4): CHIRPS/GPM daily rainfall resampled to DEM grid, normalized via sigmoid around 50mm/day flood-triggering threshold.
+
+Final risk per cell ∈ [0, 1], then sampled along road edges (mean of points every ~10m).
+
+**Alternatives considered:**
+
+- Full hydrological modeling (TAUDEM, PCRaster) — too complex for v1, requires drainage network.
+- Simple elevation threshold only — misses flat low-lying areas that aren't absolute minima.
+- Rainfall-only — misses persistent topographic risk.
+
+**Why this one:**
+
+- Topography is static and reliable (SRTM/Copernicus DEM), rainfall is noisier satellite proxy → weight topography higher.
+- TWI proxy captures "where water accumulates" better than elevation alone.
+- 50mm/day threshold aligns with Ghana Meteorological Agency "heavy rain" classification.
+- Sigmoid normalization gives smooth gradient rather than hard threshold.
+- Mean sampling along edges preserves spatial variation within long segments.
+
+**What would change my mind:**
+
+- If validation against known flood extents (e.g., 2015 Accra flood maps) shows systematic bias.
+- If higher-resolution DEM (LiDAR) becomes available — could do proper flow accumulation.
+- If local drainage infrastructure data (culverts, drains) becomes available — would fundamentally change the model.
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):
 
-- How flood risk is computed from DEM + rainfall (what threshold/heuristic)
 - Fixed max-degree action space vs. candidate-node-list action encoding
 - How much of the graph is "locally observable" at each step (reveal radius)
 - How road-quality labels were produced given no systematic dataset
