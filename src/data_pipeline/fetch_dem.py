@@ -29,9 +29,12 @@ import argparse
 import os
 import re
 from pathlib import Path
+import dotenv
 
 import requests
 import yaml
+
+dotenv.load_dotenv()  # read .env for local dev convenience
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "config.yaml"
