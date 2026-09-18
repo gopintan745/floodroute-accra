@@ -69,6 +69,50 @@ Final risk per cell ∈ [0, 1], then sampled along road edges (mean of points ev
 - If higher-resolution DEM (LiDAR) becomes available — could do proper flow accumulation.
 - If local drainage infrastructure data (culverts, drains) becomes available — would fundamentally change the model.
 
+## 2026-09-18 — DEM source: OpenTopography Copernicus GLO-30 (COP30)
+
+**Decision:** Fetch 30m Copernicus GLO-30 DEM from OpenTopography's Global Datasets API (demtype=COP30) for the study area bbox.
+
+**Alternatives considered:**
+
+- SRTM 30m (via OpenTopography or USGS EarthExplorer) — older, void-filled, less accurate in urban areas
+- NASADEM — improved SRTM but still 2000-era radar
+- Local LiDAR — not available for Accra at open access
+- ASTER GDEM — 30m but noisier, known artifacts
+
+**Why this one:**
+
+- COP30 (2020, 30m) is the best freely available global DEM — newer than SRTM, better vertical accuracy, fewer voids, better urban/forest penetration
+- OpenTopography API provides easy programmatic access with bbox clipping (no manual tile stitching)
+- Free personal API key, generous rate limits for research use
+- Output is cloud-optimized GeoTIFF ready for rasterio
+
+**What would change my mind:**
+
+- If COP30 coverage gaps appear in the study area (unlikely for Accra)
+- If a higher-resolution (e.g., 12m TanDEM-X, 5m LiDAR) becomes available for Accra
+- If OpenTopography API becomes unreliable or rate-limited — would fall back to local SRTM mirror
+
+## 2026-09-18 — DEM fetching pipeline
+
+**Decision:** Separate DEM fetching (fetch_dem.py) from flood-risk computation (build_flood_layer.py). fetch_dem.py writes raw GeoTIFF to data/raw/dem/; build_flood_layer.py auto-detects and loads it.
+
+**Alternatives considered:**
+
+- Single script that fetches and processes in one run
+- Manual download + place in data/raw/dem/
+
+**Why this one:**
+
+- Separation of concerns: data acquisition (needs network, API key) vs. processing (needs compute, no auth)
+- Reproducibility: fetch_dem.py is idempotent (re-running just overwrites raw file); build_flood_layer.py is deterministic given the same raw input
+- Flexibility: can swap DEM sources (COP30 vs SRTM vs local) without touching flood-risk logic
+- Audit trail: raw/ holds the exact artifact used; processed/ holds derived products
+
+**What would change my mind:**
+
+- If we move to a workflow system (Airflow, Prefect) where separation is handled differently
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):

@@ -10,13 +10,17 @@ data_sources:
   osm:
     network_type: "drive"   # passed to osmnx.graph_from_bbox
   dem:
-    provider: "copernicus"  # or "srtm"
+    provider: "opentopography"
+    demtype: "COP30"  # or "SRTMGL1"
   rainfall:
     provider: "chirps"      # or "gpm"
   traffic:
-    google_maps_api_key: "TODO"
+    provider: "mapbox"
+    mapbox_access_token: "TODO"  # set in .env or here
+    profile: "driving-traffic"  # or "driving-traffic" or "walking"
     sample_interval_minutes: 60
     sample_days: 14
+    max_requests_per_day: 300
 
 env:
   max_episode_steps: 200
