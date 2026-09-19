@@ -428,6 +428,61 @@ flood_multiplier   = 1 + flood_weight * flood_susceptibility
 
 ---
 
+## 2026-09-19 — Baseline 2: Dynamic Dijkstra (pre-planned with hazard-aware costs)
+
+**Decision:** Implement `src/baselines/dijkstra_dynamic.py` with three functions:
+
+1. `build_traffic_lookup(traffic_profile)` — converts DataFrame to O(1) dict
+2. `annotate_dynamic_costs(graph, traffic_lookup, hour, is_weekend, cost_cfg, flood_event_edges)` — mutates graph edges with `dynamic_cost`
+3. `dynamic_shortest_path(graph, traffic_profile, origin, destination, hour, is_weekend, cost_cfg, flood_event_edges)` — main entry point
+
+**Key properties:**
+
+- Uses shared `cost_model.effective_travel_time()` for apples-to-apples comparison with RL agent
+- Precomputes `dynamic_cost` on all edges, then runs standard Dijkstra (avoids networkx callable pitfalls on MultiDiGraph)
+- Returns both `total_dynamic_cost` (hazard-aware) AND `total_base_travel_time` (free-flow) — enables separating route choice quality from time estimation
+- Supports episode-specific flood events via `flood_event_edges` set (overrides static flood_risk for those edges)
+- Falls back to 1.0 traffic multiplier with logged warning if (highway_class, hour, weekend) combo missing from profile
+
+**Alternatives considered:**
+
+- Pass callable to `nx.shortest_path(weight=callable)` — networkx's MultiDiGraph signature `((u, v, d) where d is dict of parallel edges)` is error-prone and hard to debug
+- Keep separate functions for "pre-planned" vs "replanning" — currently only pre-planned is implemented; replanning stub exists for Phase 4
+- Include road quality in traffic profile — decided to keep quality as static per-edge attribute, only traffic varies by time
+
+**Why this one:**
+
+- Clean separation: `build_traffic_lookup` (data prep), `annotate_dynamic_costs` (graph mutation), `dynamic_shortest_path` (orchestration) — each testable independently
+- Same cost model as RL reward → fair comparison
+- Reports both dynamic and base costs → later evaluation can ask "did the route avoid hazards or just take a different path?"
+
+**What would change my mind:**
+
+- If graph mutation becomes problematic (e.g., concurrent runs) — would switch to copying graph or using edge attributes dict
+- If traffic profile grows large enough that O(1) dict memory matters — unlikely for this scale
+
+---
+
+## 2026-09-19 — Dynamic Dijkstra returns both dynamic and base costs
+
+**Decision:** `dynamic_shortest_path()` returns both `total_dynamic_cost` (hazard-aware estimate) and `total_base_travel_time` (free-flow sum along the chosen path).
+
+**Why this matters:**
+
+- The dynamic cost is what the planner *thinks* the trip will take (used for route selection)
+- The base travel time is the actual distance/free-flow time of that route (useful for comparison)
+- The ratio `dynamic_cost / base_travel_time` reveals how much the planner expects hazards to slow this specific route
+- In evaluation, we can compare:
+  - Static baseline's base vs. actual (cost of ignorance)
+  - Dynamic baseline's predicted dynamic vs. actual (quality of prediction)
+  - Dynamic baseline's chosen route vs. static's route (value of hazard-aware planning)
+
+**What would change my mind:**
+
+- If we need more granular breakdown (traffic component vs. flood component vs. quality component) — could add `cost_breakdown` dict to return value.
+
+---
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):
