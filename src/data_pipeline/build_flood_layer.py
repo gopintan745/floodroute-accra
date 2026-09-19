@@ -5,11 +5,13 @@ elevation and rainfall data.
 Input:  data/raw/dem/*, data/raw/rainfall/*
 Output: data/processed/flood_risk.tif  (raster)
         + a per-edge flood-risk column merged in build_graph_costs.py
+        + data/processed/rainfall_climatology.json (monthly heavy-rain-day frequency)
 
 Design decisions documented in docs/design_decisions.md
 """
 
 import argparse
+import json
 import logging
 from pathlib import Path
 
@@ -31,9 +33,13 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "config.yaml"
 DEFAULT_OUTPUT_TIF = REPO_ROOT / "data" / "processed" / "flood_risk.tif"
+DEFAULT_CLIMATOLOGY_JSON = REPO_ROOT / "data" / "processed" / "rainfall_climatology.json"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Flood-triggering threshold (mm/day) — consistent with load_rainfall_data
+FLOOD_THRESHOLD_MM = 50.0
 
 
 def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
@@ -330,6 +336,95 @@ def create_synthetic_rainfall(shape: tuple[int, int]) -> np.ndarray:
     return np.clip(base + noise, 0, 1)
 
 
+def compute_rainfall_climatology(rainfall_path: Path) -> dict:
+    """
+    Compute monthly climatology of heavy-rain-day frequency from Open-Meteo data.
+
+    Returns a dict with:
+    - monthly_heavy_rain_frequency: list of 12 floats (0-1), probability of a day
+      exceeding FLOOD_THRESHOLD_MM in each month (Jan=0, Dec=11)
+    - monthly_mean_precip: list of 12 floats, mean daily precip (mm) per month
+    - monthly_max_precip: list of 12 floats, max daily precip (mm) per month
+    - total_days: int, total days in record
+    - heavy_rain_days_total: int, total days exceeding threshold
+    - record_start: str, first date in record
+    - record_end: str, last date in record
+    """
+    import json
+    from collections import defaultdict
+
+    with open(rainfall_path) as f:
+        data = json.load(f)
+
+    if "daily" not in data or "precipitation_sum" not in data["daily"]:
+        raise ValueError("Rainfall file does not contain Open-Meteo daily precipitation data")
+
+    precip = data["daily"]["precipitation_sum"]
+    times = data["daily"]["time"]
+
+    if not precip or not times:
+        raise ValueError("Empty precipitation or time arrays")
+
+    # Group by month
+    monthly_precip = defaultdict(list)
+    for date_str, p in zip(times, precip):
+        if p is None:
+            continue
+        month = int(date_str.split("-")[1]) - 1  # 0-indexed
+        monthly_precip[month].append(float(p))
+
+    # Compute statistics per month
+    monthly_heavy_rain_frequency = []
+    monthly_mean_precip = []
+    monthly_max_precip = []
+
+    for month in range(12):
+        vals = monthly_precip.get(month, [])
+        if vals:
+            heavy_count = sum(1 for v in vals if v >= FLOOD_THRESHOLD_MM)
+            freq = heavy_count / len(vals)
+            mean_precip = sum(vals) / len(vals)
+            max_precip = max(vals)
+        else:
+            freq = 0.0
+            mean_precip = 0.0
+            max_precip = 0.0
+
+        monthly_heavy_rain_frequency.append(round(freq, 4))
+        monthly_mean_precip.append(round(mean_precip, 2))
+        monthly_max_precip.append(round(max_precip, 2))
+
+    # Overall stats
+    all_precip = [float(p) for p in precip if p is not None]
+    heavy_total = sum(1 for p in all_precip if p >= FLOOD_THRESHOLD_MM)
+
+    climatology = {
+        "monthly_heavy_rain_frequency": monthly_heavy_rain_frequency,
+        "monthly_mean_precip_mm": monthly_mean_precip,
+        "monthly_max_precip_mm": monthly_max_precip,
+        "total_days": len(all_precip),
+        "heavy_rain_days_total": heavy_total,
+        "overall_heavy_rain_frequency": round(heavy_total / len(all_precip), 4) if all_precip else 0.0,
+        "record_start": times[0],
+        "record_end": times[-1],
+        "flood_threshold_mm": FLOOD_THRESHOLD_MM,
+    }
+
+    logger.info(f"Rainfall climatology: {heavy_total}/{len(all_precip)} heavy rain days "
+                f"({climatology['overall_heavy_rain_frequency']:.1%})")
+    logger.info(f"Monthly heavy-rain freq: {[f'{f:.1%}' for f in monthly_heavy_rain_frequency]}")
+
+    return climatology
+
+
+def save_rainfall_climatology(climatology: dict, output_path: Path) -> None:
+    """Save rainfall climatology to JSON."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(climatology, f, indent=2)
+    logger.info(f"Saved rainfall climatology to {output_path}")
+
+
 def combine_flood_risk(topo_risk: np.ndarray, rainfall_risk: np.ndarray,
                         topo_weight: float = 0.6, rain_weight: float = 0.4) -> np.ndarray:
     """
@@ -536,9 +631,28 @@ def main() -> None:
     parser.add_argument("--rainfall", type=Path, help="Path to rainfall data file")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_TIF)
     parser.add_argument("--graph", type=Path, help="Path to road graph GraphML for edge sampling")
+    parser.add_argument("--climatology", type=Path, default=DEFAULT_CLIMATOLOGY_JSON,
+                        help="Output path for rainfall climatology JSON")
+    parser.add_argument("--climatology-only", action="store_true",
+                        help="Only compute rainfall climatology, skip flood risk raster")
     args = parser.parse_args()
 
     config = load_config(args.config)
+
+    # Determine rainfall file path
+    rainfall_path = args.rainfall
+    if rainfall_path is None:
+        rainfall_path = find_rainfall_file(REPO_ROOT / "data" / "raw" / "rainfall")
+
+    # Compute rainfall climatology if rainfall data is available
+    if rainfall_path and rainfall_path.exists():
+        logger.info(f"Computing rainfall climatology from {rainfall_path}")
+        climatology = compute_rainfall_climatology(rainfall_path)
+        save_rainfall_climatology(climatology, args.climatology)
+
+    if args.climatology_only:
+        logger.info("Climatology-only mode, skipping flood risk raster")
+        return
 
     # Compute flood risk raster
     flood_risk = compute_flood_risk_raster(
