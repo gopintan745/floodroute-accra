@@ -234,6 +234,96 @@ Final risk per cell ∈ [0, 1], then sampled along road edges (mean of points ev
 
 ---
 
+## 2026-09-19 — Config/schema drift between config.yaml and build_graph_costs.py — RESOLVED
+
+**Decision:** Document and resolve several mismatches between the current `config.yaml` and what `build_graph_costs.py` / `build_flood_layer.py` actually expect.
+
+### Issues identified
+
+| Config key in YAML | Expected by code | Status |
+| --- | --- | --- |
+| `road_quality.highway_base_scores` | `road_quality.highway_fallback_scores` | **Mismatch** — code will KeyError |
+| `road_quality.surface_multipliers` | `road_quality.surface_scores` | **Mismatch** — code will KeyError |
+| `road_quality.default_highway_score` | `road_quality.default_score` | **Mismatch** — code will KeyError |
+| `road_quality.smoothness_blend_weight` | `road_quality.smoothness_weight` | **Mismatch** — code will KeyError |
+| `flood_risk.heavy_rain_threshold_mm: 20` | `FLOOD_THRESHOLD_MM = 50.0` (hardcoded in `build_flood_layer.py`) | **Inconsistent** — climatology uses 50mm, flood layer uses 20mm |
+| `traffic_profile` section | Not used by `build_graph_costs.py` (uses `traffic_synthetic` instead) | **Dead config** — two parallel traffic configs exist |
+| `traffic_synthetic` section | Used by `build_graph_costs.py` | **Missing from `config.example.yaml`** — tracked template incomplete |
+
+### Root cause
+
+The config evolved in two parallel branches:
+
+1. `flood_risk` + `road_quality` + `traffic_profile` — designed for a different (never-built) pipeline
+2. `traffic_synthetic` — designed for the actual `build_graph_costs.py` implementation
+
+The example template (`config.example.yaml`) was never updated to match either branch.
+
+### Resolution implemented
+
+1. **Updated `road_quality_score()` in `build_graph_costs.py`** to read the YAML keys as they exist in config.yaml (`highway_base_scores`, `surface_multipliers`, `default_highway_score`, `smoothness_blend_weight`), with `.get()` fallbacks for safety.
+2. **Made `build_flood_layer.py` read threshold from config** (`flood_risk.heavy_rain_threshold_mm`) instead of hardcoding 50mm. Default fallback remains 50mm if key missing.
+3. **Updated `config.example.yaml`** to match the actual config.yaml — now includes `flood_risk`, `road_quality`, and `traffic_synthetic` sections.
+4. **Left `traffic_profile` in config.yaml** (harmless dead config) but documented it as unused. Can be removed in a future cleanup pass.
+
+### Verification
+
+- `build_flood_layer.py --climatology-only` now uses 20mm threshold (from config) → 54 heavy rain days (1.3%) vs. 6 at 50mm.
+- `build_graph_costs.py --synthetic-only` runs without KeyError, produces `road_graph_full.graphml` and `traffic_profile.parquet` (528 synthetic rows).
+
+### What would change my mind
+
+- If we decide to refactor the whole config schema at once (e.g., move to Pydantic models with validation) — then fix all at once rather than piecemeal.
+
+---
+
+## 2026-09-19 — Real traffic blending uses midpoint snap-to-graph (known limitation)
+
+**Decision:** `_load_real_traffic_samples()` in `build_graph_costs.py` maps each traffic sample segment to a graph edge by snapping the segment's midpoint to the nearest edge via `ox.distance.nearest_edges`, then borrowing that edge's `highway_class`.
+
+**Why this matters:**
+
+- The 5 predefined segments in `sample_traffic.py` (Kaneshie First Light, Graphic Road, etc.) are arbitrary OD pairs, not OSM edges — they may cross multiple road classes.
+- Midpoint snap assigns **one** highway class per segment, losing within-segment variation (e.g., a segment crossing from primary → residential).
+- If the snapped edge is not representative of the segment's dominant character, the real multiplier gets attributed to the wrong class bucket.
+- This is acceptable for v1 given small sample size (~5 segments × N days), but introduces label noise.
+
+**Alternatives considered:**
+
+- Sample multiple points along each segment and take majority class — more robust but adds complexity.
+- Define segments as exact OSM edge sequences instead of arbitrary OD pairs — would require manual mapping effort.
+- Use segment length-weighted average of classes along the route — requires route geometry from Mapbox, not just OD pairs.
+
+**What would change my mind:**
+
+- If real sample count grows large enough that misattribution noise becomes the limiting factor.
+- If we switch to defining segments as explicit OSM edge sequences (e.g., from the cleaned graph itself).
+
+---
+
+## 2026-09-19 — Traffic profile blending: real overrides synthetic per (class, hour, weekend) bucket
+
+**Decision:** `blend_traffic_profiles()` does a left-join merge where real samples **replace** the synthetic multiplier for matching (highway_class, hour, is_weekend) buckets; synthetic fills all other buckets. The `num_real_samples` column tracks evidence count (0 = synthetic-only).
+
+**Alternatives considered:**
+
+- Weighted average by sample count — smoother but dilutes real signal with synthetic prior.
+- Bayesian update with synthetic as prior — statistically cleaner but adds complexity (need uncertainty estimates).
+- Keep both separate, let RL env choose at runtime — more flexible but pushes complexity downstream.
+
+**Why this one:**
+
+- Simple, deterministic, auditable: "real data wins where it exists."
+- `num_real_samples = 0` rows are explicitly flagged — downstream can apply confidence weighting if desired.
+- Works even with N=1 real sample per bucket (no averaging needed).
+
+**What would change my mind:**
+
+- If real samples are very sparse (e.g., only 1–2 per bucket) and noisy — then a weighted blend or Bayesian shrink would be better.
+- If we get enough real data to estimate per-bucket confidence intervals.
+
+---
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):

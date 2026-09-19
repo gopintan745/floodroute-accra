@@ -38,8 +38,8 @@ DEFAULT_CLIMATOLOGY_JSON = REPO_ROOT / "data" / "processed" / "rainfall_climatol
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Flood-triggering threshold (mm/day) — consistent with load_rainfall_data
-FLOOD_THRESHOLD_MM = 50.0
+# Flood-triggering threshold (mm/day) — default fallback if not in config
+DEFAULT_FLOOD_THRESHOLD_MM = 50.0
 
 
 def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
@@ -175,7 +175,8 @@ def compute_topographic_wetness_index(dem: np.ndarray, transform: rasterio.Affin
 
 
 def load_rainfall_data(rainfall_path: Path, bbox: tuple[float, float, float, float],
-                        dem_shape: tuple[int, int], dem_transform: rasterio.Affine) -> np.ndarray:
+                        dem_shape: tuple[int, int], dem_transform: rasterio.Affine,
+                        flood_threshold_mm: float = DEFAULT_FLOOD_THRESHOLD_MM) -> np.ndarray:
     """
     Load rainfall data and resample to match DEM grid.
 
@@ -215,8 +216,7 @@ def load_rainfall_data(rainfall_path: Path, bbox: tuple[float, float, float, flo
             logger.info(f"Open-Meteo rainfall: {len(precip_arr)} days, "
                         f"95th percentile = {rep_precip_mm:.1f} mm/day")
 
-            # Normalize using sigmoid around 50mm/day flood threshold
-            flood_threshold_mm = 50.0
+            # Normalize using sigmoid around flood threshold
             rain_norm = 1.0 / (1.0 + np.exp(-(rep_precip_mm - flood_threshold_mm) / 20.0))
             rain_norm = np.clip(rain_norm, 0, 1)
 
@@ -312,9 +312,8 @@ def load_rainfall_data(rainfall_path: Path, bbox: tuple[float, float, float, flo
             )
 
             # Normalize rainfall to 0-1 using a flood-triggering threshold
-            # CHIRPS is in mm/day; >50mm/day is heavy rain, >100mm/day is extreme
-            # Use a sigmoid-like normalization around 50mm/day threshold
-            flood_threshold_mm = 50.0
+            # CHIRPS is in mm/day; >threshold is heavy rain
+            flood_threshold_mm = flood_threshold_mm  # passed as parameter
             rain_norm = 1.0 / (1.0 + np.exp(-(dst_rain - flood_threshold_mm) / 20.0))
 
             return np.clip(rain_norm, 0, 1)
@@ -336,13 +335,13 @@ def create_synthetic_rainfall(shape: tuple[int, int]) -> np.ndarray:
     return np.clip(base + noise, 0, 1)
 
 
-def compute_rainfall_climatology(rainfall_path: Path) -> dict:
+def compute_rainfall_climatology(rainfall_path: Path, flood_threshold_mm: float = DEFAULT_FLOOD_THRESHOLD_MM) -> dict:
     """
     Compute monthly climatology of heavy-rain-day frequency from Open-Meteo data.
 
     Returns a dict with:
     - monthly_heavy_rain_frequency: list of 12 floats (0-1), probability of a day
-      exceeding FLOOD_THRESHOLD_MM in each month (Jan=0, Dec=11)
+      exceeding flood_threshold_mm in each month (Jan=0, Dec=11)
     - monthly_mean_precip: list of 12 floats, mean daily precip (mm) per month
     - monthly_max_precip: list of 12 floats, max daily precip (mm) per month
     - total_days: int, total days in record
@@ -381,7 +380,7 @@ def compute_rainfall_climatology(rainfall_path: Path) -> dict:
     for month in range(12):
         vals = monthly_precip.get(month, [])
         if vals:
-            heavy_count = sum(1 for v in vals if v >= FLOOD_THRESHOLD_MM)
+            heavy_count = sum(1 for v in vals if v >= flood_threshold_mm)
             freq = heavy_count / len(vals)
             mean_precip = sum(vals) / len(vals)
             max_precip = max(vals)
@@ -396,7 +395,7 @@ def compute_rainfall_climatology(rainfall_path: Path) -> dict:
 
     # Overall stats
     all_precip = [float(p) for p in precip if p is not None]
-    heavy_total = sum(1 for p in all_precip if p >= FLOOD_THRESHOLD_MM)
+    heavy_total = sum(1 for p in all_precip if p >= flood_threshold_mm)
 
     climatology = {
         "monthly_heavy_rain_frequency": monthly_heavy_rain_frequency,
@@ -407,11 +406,11 @@ def compute_rainfall_climatology(rainfall_path: Path) -> dict:
         "overall_heavy_rain_frequency": round(heavy_total / len(all_precip), 4) if all_precip else 0.0,
         "record_start": times[0],
         "record_end": times[-1],
-        "flood_threshold_mm": FLOOD_THRESHOLD_MM,
+        "flood_threshold_mm": flood_threshold_mm,
     }
 
     logger.info(f"Rainfall climatology: {heavy_total}/{len(all_precip)} heavy rain days "
-                f"({climatology['overall_heavy_rain_frequency']:.1%})")
+                f"({climatology['overall_heavy_rain_frequency']:.1%}) at threshold {flood_threshold_mm}mm")
     logger.info(f"Monthly heavy-rain freq: {[f'{f:.1%}' for f in monthly_heavy_rain_frequency]}")
 
     return climatology
@@ -481,6 +480,7 @@ def compute_flood_risk_raster(config: dict | None = None,
         config = load_config()
 
     bbox = get_study_area_bbox(config)
+    flood_threshold_mm = config.get("flood_risk", {}).get("heavy_rain_threshold_mm", DEFAULT_FLOOD_THRESHOLD_MM)
 
     # Auto-detect input files if not provided
     if dem_path is None:
@@ -501,9 +501,9 @@ def compute_flood_risk_raster(config: dict | None = None,
             rainfall_risk = create_synthetic_rainfall(dem_array.shape)
         else:
             logger.info(f"Using rainfall data: {rainfall_path}")
-            rainfall_risk = load_rainfall_data(rainfall_path, bbox, dem_array.shape, transform)
+            rainfall_risk = load_rainfall_data(rainfall_path, bbox, dem_array.shape, transform, flood_threshold_mm)
     else:
-        rainfall_risk = load_rainfall_data(rainfall_path, bbox, dem_array.shape, transform)
+        rainfall_risk = load_rainfall_data(rainfall_path, bbox, dem_array.shape, transform, flood_threshold_mm)
 
     # Compute topographic flood risk
     logger.info("Computing topographic wetness index...")
@@ -638,6 +638,7 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
+    flood_threshold_mm = config.get("flood_risk", {}).get("heavy_rain_threshold_mm", DEFAULT_FLOOD_THRESHOLD_MM)
 
     # Determine rainfall file path
     rainfall_path = args.rainfall
@@ -647,7 +648,7 @@ def main() -> None:
     # Compute rainfall climatology if rainfall data is available
     if rainfall_path and rainfall_path.exists():
         logger.info(f"Computing rainfall climatology from {rainfall_path}")
-        climatology = compute_rainfall_climatology(rainfall_path)
+        climatology = compute_rainfall_climatology(rainfall_path, flood_threshold_mm)
         save_rainfall_climatology(climatology, args.climatology)
 
     if args.climatology_only:

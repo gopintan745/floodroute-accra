@@ -2,9 +2,9 @@
 # config.yaml is gitignored — config.example.yaml is the tracked template.
 
 study_area:
-  name: "TODO: e.g. Circle-Kaneshie corridor"
+  name: "Kanesshie Market and Surrounding Area, Accra, Ghana"
   # Bounding box in (south, west, north, east) — decimal degrees
-  bbox: [5.55, -0.25, 5.60, -0.18]
+  bbox: [5.548, -0.245, 5.575, -0.210]
 
 data_sources:
   osm:
@@ -23,6 +23,93 @@ data_sources:
     sample_interval_minutes: 60
     sample_days: 14
     max_requests_per_day: 300
+
+flood_risk:
+  # v1 terrain-based susceptibility heuristic (see docs/design_decisions.md):
+  # combines relative low elevation + local flatness, since full flow-
+  # accumulation hydrological modeling is out of scope for a first pass.
+  elevation_weight: 0.7
+  flatness_weight: 0.3
+  # Percentile clipping before normalizing elevation, to avoid a single
+  # noisy DEM pixel skewing the whole study area's relative scale.
+  elevation_clip_percentiles: [2, 98]
+  # mm/day threshold used to define a "heavy rain day" in the rainfall
+  # climatology — commonly cited threshold for urban flash-flood risk in
+  # West African coastal cities; adjust if local sources suggest otherwise.
+  heavy_rain_threshold_mm: 20
+  # UTM zone for reprojecting the DEM before computing slope in real
+  # meters (Ghana/Accra falls in UTM zone 30N).
+  utm_epsg: 32630
+
+road_quality:
+  # v1 heuristic scored purely from OSM tags already present on the graph —
+  # no new data collection. Scale: 1.0 = best (smooth paved), 0.0 = worst
+  # (impassable). See docs/design_decisions.md for rationale.
+  # Base score by OSM highway classification.
+  highway_base_scores:
+    motorway: 0.95
+    trunk: 0.9
+    primary: 0.85
+    secondary: 0.8
+    tertiary: 0.75
+    unclassified: 0.6
+    residential: 0.6
+    living_street: 0.55
+    service: 0.5
+    track: 0.25
+    path: 0.15
+  default_highway_score: 0.5   # used if highway tag is missing/unrecognized
+  # Multiplier applied to the base score if an OSM `surface` tag is present.
+  surface_multipliers:
+    paved: 1.0
+    asphalt: 1.0
+    concrete: 1.0
+    paving_stones: 0.95
+    compacted: 0.8
+    unpaved: 0.75
+    gravel: 0.6
+    fine_gravel: 0.6
+    dirt: 0.4
+    earth: 0.4
+    ground: 0.4
+    sand: 0.35
+    mud: 0.3
+  # Direct score if an OSM `smoothness` tag is present (rare, but the most
+  # informative signal when it exists) — blended with the highway+surface
+  # score rather than fully overriding it, since smoothness tags are often
+  # subjective/outdated.
+  smoothness_scores:
+    excellent: 1.0
+    good: 0.85
+    intermediate: 0.65
+    bad: 0.4
+    very_bad: 0.2
+    horrible: 0.1
+    very_horrible: 0.05
+    impassable: 0.0
+  smoothness_blend_weight: 0.6   # weight on smoothness_score when tag is present
+
+traffic_synthetic:
+  # v1 time-of-day congestion multiplier, used as a fallback/blend base
+  # until enough real Mapbox samples (sample_traffic.py) accumulate.
+  # Applied as base_travel_time * multiplier, looked up by
+  # (highway_class, hour_of_day, is_weekend) at simulation runtime.
+  peak_hours_morning: [7, 9]
+  peak_hours_evening: [16, 19]
+  weekday_peak_multiplier:
+    motorway: 2.2
+    trunk: 2.0
+    primary: 1.9
+    secondary: 1.7
+    tertiary: 1.4
+    unclassified: 1.3
+    residential: 1.2
+    living_street: 1.1
+    service: 1.1
+    track: 1.0
+    path: 1.0
+  weekend_peak_multiplier_factor: 0.6   # weekend peak = 1 + (weekday_peak - 1) * factor
+  offpeak_multiplier: 1.05              # applied at all non-peak hours, all classes
 
 env:
   max_episode_steps: 200
