@@ -111,6 +111,24 @@ traffic_synthetic:
   weekend_peak_multiplier_factor: 0.6   # weekend peak = 1 + (weekday_peak - 1) * factor
   offpeak_multiplier: 1.05              # applied at all non-peak hours, all classes
 
+cost_model:
+  # Weights for the effective_travel_time() cost function (src/common/cost_model.py).
+  # This function is shared by the RL env reward calculation and the Dijkstra baselines,
+  # ensuring apples-to-apples comparison.
+  #
+  # effective_travel_time = base_travel_time * traffic_multiplier * quality_multiplier * flood_multiplier
+  # where:
+  #   quality_multiplier = 1 + (1 - road_quality_score) * quality_penalty_weight
+  #   flood_multiplier   = 1 + flood_weight * flood_susceptibility
+  #
+  # Both weights are >= 0. Higher = stronger penalty for poor quality / high flood risk.
+  # flood_weight: how much extra travel time (proportional) a fully flood-susceptible edge (score=1)
+  #               adds vs. a zero-risk edge. E.g., 0.5 means +50% travel time at max flood risk.
+  # quality_penalty_weight: how much extra travel time a worst-quality edge (score=0) adds vs.
+  #                         best quality (score=1). E.g., 1.0 means 2x travel time at worst quality.
+  flood_weight: 0.5
+  quality_penalty_weight: 1.0
+
 env:
   max_episode_steps: 200
   flood_penalty: 50          # minutes-equivalent penalty for hitting a flooded edge

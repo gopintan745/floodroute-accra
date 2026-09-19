@@ -324,6 +324,60 @@ The example template (`config.example.yaml`) was never updated to match either b
 
 ---
 
+## 2026-09-19 — Shared cost model for RL and baselines (Phase 3)
+
+**Decision:** Create `src/common/cost_model.py` with a single `effective_travel_time()` function used by both the RL environment (reward calculation) and classical baselines (Dijkstra/A* edge weights). Add `cost_model` section to config.yaml with `flood_weight` and `quality_penalty_weight`.
+
+**Formula:**
+
+```python
+effective_travel_time = base_travel_time * traffic_multiplier * quality_multiplier * flood_multiplier
+quality_multiplier = 1 + (1 - road_quality_score) * quality_penalty_weight
+flood_multiplier   = 1 + flood_weight * flood_susceptibility
+```
+
+**Config defaults:** `flood_weight: 0.5`, `quality_penalty_weight: 1.0`
+
+**Alternatives considered:**
+
+- Separate cost functions for RL (reward) vs. baselines (edge weight) — allows tuning each independently but breaks comparability; "apples-to-apples" comparison requires identical cost model.
+- Additive penalties instead of multiplicative — simpler but doesn't scale with base travel time (a 5-min penalty on a 1-min edge vs. 60-min edge has very different meaning).
+- Exponential flood penalty (e.g., `exp(flood_weight * risk)`) — more aggressive on high-risk edges but harder to calibrate and explain.
+
+**Why this one:**
+
+- Multiplicative form naturally scales penalties with base travel time (a 10-min detour on a 60-min highway is proportional).
+- Single shared function guarantees the RL agent is optimizing the exact same objective the baselines use — any performance difference is due to policy quality, not cost-model mismatch.
+- Two interpretable weights (`flood_weight`, `quality_penalty_weight`) map directly to config; easy to sweep in sensitivity analysis.
+- Pure, stateless function — trivial to test, serialize, and reason about.
+- `CostModelConfig` dataclass with `from_yaml()` enables clean dependency injection in both RL env and baselines.
+
+**What would change my mind:**
+
+- If validation shows the multiplicative form creates pathological routing (e.g., completely avoiding all flood-prone edges even when detour is massive) — might need a saturating function like `1 + weight * risk / (1 + risk)`.
+- If we add more hazard dimensions (e.g., landslide risk, security risk) — the function signature would grow; could refactor to a `HazardWeights` dict.
+
+---
+
+## 2026-09-19 — Cost model config: flood_weight=0.5, quality_penalty_weight=1.0
+
+**Decision:** Set default weights to `flood_weight=0.5` and `quality_penalty_weight=1.0` in config.yaml.
+
+**Interpretation:**
+
+- `flood_weight=0.5`: A maximally flood-susceptible edge (score=1.0) incurs +50% travel time vs. zero-risk edge. This is a moderate penalty — flood risk increases cost but doesn't dominate routing unless risk is very high.
+- `quality_penalty_weight=1.0`: A worst-quality edge (score=0.0) incurs 2x travel time vs. best quality (score=1.0). This is a strong penalty — road quality has a larger marginal effect than flood risk at these defaults.
+
+**Rationale:** Road quality is a persistent, always-present signal (every edge has a score), while flood risk is episodic (only relevant during/after heavy rain). A stronger quality weight ensures the baseline routing prefers good roads even in dry conditions, while flood weight acts as a conditional amplifier during flood events.
+
+**What would change my mind:**
+
+- If real-world validation (e.g., driver surveys, GPS traces) shows different relative importance.
+- If the flood risk scores turn out to be systematically over/under-estimated — would adjust weight to compensate.
+- If we want to run ablation studies — the config structure makes it trivial to sweep weights.
+
+---
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):
