@@ -187,6 +187,53 @@ Final risk per cell ∈ [0, 1], then sampled along road edges (mean of points ev
 - If we expand study area beyond ~5km radius — spatial rainfall variation becomes non-negligible
 - Could implement multi-point querying (N calls to Open-Meteo) to build a coarse spatial field
 
+## 2026-09-19 — Rainfall climatology: monthly heavy-rain-day frequency
+
+**Decision:** Add a rainfall climatology output (`data/processed/rainfall_climatology.json`) computed from the Open-Meteo daily time series. The climatology provides a 12-month array of heavy-rain-day frequency (probability that a random day in that month exceeds 50mm), plus monthly mean/max precipitation and overall statistics.
+
+**Alternatives considered:**
+
+- Embed climatology computation inside the RL environment at runtime — adds dependency on raw data at training time, and recomputes the same thing repeatedly.
+- Use a static seasonal multiplier (e.g., "rainy season = 2x flood risk") — too coarse, doesn't capture the actual frequency distribution from the historical record.
+- No climatology; just use the single 95th-percentile scalar from the full record — loses the seasonal signal that's critical for Accra (major vs. minor rainy seasons).
+
+**Why this one:**
+
+- The Open-Meteo record spans 2015–present (~11 years), enough for a meaningful monthly climatology.
+- Accra has a bimodal rainy season (major: April–July, minor: September–October); the monthly frequency captures this naturally (e.g., May/Jun/Jul/Oct show ~0.3% heavy-rain-day frequency vs. 0% in dry months).
+- The output is a standalone JSON — easy for the RL environment to load at episode initialization to sample flood-event probabilities conditioned on month.
+- Separates "climatology" (long-term frequency) from "weather" (realized flood event in an episode) — the RL agent learns to condition on the climatology prior, not the single historical realization.
+
+**What would change my mind:**
+
+- If the record length is insufficient for stable monthly estimates (current ~4278 days gives ~356 days/month, marginal but usable).
+- If we switch to a gridded product (CHIRPS) with longer record (1981–present) — would recompute with that.
+- If the RL environment needs sub-monthly resolution (e.g., weekly) — could extend the output format.
+
+---
+
+## 2026-09-19 — Flood risk layer now auto-generates climatology alongside raster
+
+**Decision:** `build_flood_layer.py` now computes and saves `rainfall_climatology.json` by default during a full run (and offers `--climatology-only` for fast standalone generation).
+
+**Alternatives considered:**
+
+- Separate script for climatology — adds maintenance burden; the logic is small and shares the rainfall loading code.
+- Compute climatology on-the-fly in the RL env — would require raw data access at training time.
+
+**Why this one:**
+
+- Single source of truth: the same rainfall loading logic (Open-Meteo JSON parsing, 50mm threshold) is used for both the flood-risk raster and the climatology.
+- Reproducibility: climatology is a derived product of the exact same rainfall file used for flood risk.
+- `--climatology-only` flag enables fast iteration on climatology without waiting for DEM processing.
+
+**What would change my mind:**
+
+- If climatology computation becomes complex enough to warrant its own module (e.g., multi-source blending, uncertainty quantification).
+- If we adopt a workflow orchestrator that prefers separate tasks.
+
+---
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):
