@@ -378,6 +378,56 @@ flood_multiplier   = 1 + flood_weight * flood_susceptibility
 
 ---
 
+## 2026-09-19 — Baseline 1: Static Dijkstra (free-flow only)
+
+**Decision:** Implement `src/baselines/dijkstra_static.py` with `static_shortest_path()` using only the free-flow `travel_time` edge attribute as weight. This is the "naive" comparator — what a standard map app without live traffic/flood awareness would produce.
+
+**Key properties:**
+
+- Uses `ox.distance.nearest_nodes` to snap (lon, lat) to graph nodes
+- Runs `nx.shortest_path(graph, orig, dest, weight="travel_time")`
+- Returns path node list, total free-flow time, path length, edge count
+- Handles disconnected graphs (returns `inf` travel time)
+- Includes `evaluate_route()` for post-hoc evaluation against HazardSimulator's true episode conditions (flood penalties, actual travel time with traffic)
+
+**Alternatives considered:**
+
+- Use expected-traffic weights (synthetic profile average) instead of free-flow — would be a "slightly informed" baseline, but the proposal specifically calls for "naive" as Baseline 1.
+- A* with haversine heuristic — faster on large graphs but this study area is small (~2300 nodes); Dijkstra is fast enough and simpler.
+- Include flood_risk/road_quality in static weight — that would be Baseline 2 (dynamic Dijkstra), not the naive baseline.
+
+**Why this one:**
+
+- Matches the proposal's "static and dynamically-weighted shortest-path baselines" — this is the static one.
+- Pure free-flow is the absolute minimum information baseline; any improvement over it demonstrates value of hazard awareness.
+- Simple, well-understood, reproducible — serves as a solid anchor for comparison.
+
+**What would change my mind:**
+
+- If the study area expands significantly (city-wide) and Dijkstra becomes slow — would switch to A*.
+- If the proposal's evaluation framework changes to require a different "naive" definition.
+
+---
+
+## 2026-09-19 — Static baseline evaluation against HazardSimulator
+
+**Decision:** The `evaluate_route()` function in `dijkstra_static.py` evaluates a fixed pre-computed route against the episode's true conditions (from HazardSimulator), applying flood penalties and traffic multipliers post-hoc. The route does NOT adapt — that's the point.
+
+**Metrics returned:**
+
+- `actual_travel_time`: base * traffic_multiplier + flood penalties
+- `flood_penalties`: total seconds added for flooded edges (default 50 min = 3000s per edge)
+- `edges_hit_flooded`: count of flooded edges on the route
+- `success`: True if zero flooded edges hit
+- `base_travel_time`: the original free-flow time (for comparison)
+
+**Why this matters:**
+
+- The static baseline's "planned" time (free-flow) vs. "actual" time (with penalties) quantifies the cost of ignorance.
+- RL agent and dynamic baselines can adapt mid-route; static cannot. This difference IS the research question.
+
+---
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):
