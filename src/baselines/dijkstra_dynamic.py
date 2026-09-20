@@ -9,9 +9,8 @@ Three-function structure:
 2. annotate_dynamic_costs() — mutates graph edges with dynamic_cost
 3. dynamic_shortest_path() — main entry point, returns both dynamic and base costs
 
-The replanning variant (`dynamic_shortest_path_with_replanning`) is
-NOT implemented here — it depends on HazardSimulator (Phase 4) which
-defines what "revealed" means. Will be added in Phase 4.
+The replanning variant uses the same HazardSimulator realization as the
+environment and replans from the driver's locally revealed flood state.
 """
 
 import logging
@@ -46,6 +45,7 @@ def annotate_dynamic_costs(
     is_weekend: bool,
     cost_cfg: CostModelConfig,
     flood_event_edges: set = None,
+    reveal_overrides: dict = None,
 ) -> None:
     """
     Mutate graph in place: set edge['dynamic_cost'] = effective_travel_time(...) for every edge.
@@ -61,9 +61,15 @@ def annotate_dynamic_costs(
         is_weekend: bool
         cost_cfg: CostModelConfig with flood_weight and quality_penalty_weight
         flood_event_edges: optional set of (u, v, key) tuples that are flooded THIS episode
+        reveal_overrides: optional mapping of (u, v, key) to a revealed boolean.
+            ``True`` and ``False`` replace the static susceptibility for that
+            edge. ``None`` means the edge is not revealed and keeps its static
+            susceptibility.
     """
     if flood_event_edges is None:
         flood_event_edges = set()
+    if reveal_overrides is None:
+        reveal_overrides = {}
 
     for u, v, key, data in graph.edges(keys=True, data=True):
         base_tt = data.get("travel_time", 0.0)
@@ -78,9 +84,12 @@ def annotate_dynamic_costs(
                 f"falling back to 1.0"
             )
 
-        # Flood susceptibility: episode-specific flood overrides static flood_risk
-        if (u, v, key) in flood_event_edges:
-            flood_susc = 1.0  # fully flooded this episode
+        edge_id = (u, v, key)
+        # Revealed ground truth replaces the prior only for this planning step.
+        if edge_id in reveal_overrides and reveal_overrides[edge_id] is not None:
+            flood_susc = 1.0 if reveal_overrides[edge_id] else 0.0
+        elif edge_id in flood_event_edges:
+            flood_susc = 1.0
         else:
             flood_susc = data.get("flood_risk", 0.0)
             # Handle NaN and string values
@@ -216,25 +225,125 @@ def dynamic_shortest_path(
 
 
 # --------------------------------------------------------------------------
-# Replanning stub — to be implemented in Phase 4 when HazardSimulator exists
+# Replanning baseline
 # --------------------------------------------------------------------------
 
-def dynamic_shortest_path_with_replanning(env_or_graph, origin, destination):
-    """
-    Re-plans at each step using revealed information, for a fairer
-    comparison against the RL agent's adaptive behavior.
+def _nearest_node(graph, point):
+    return ox.distance.nearest_nodes(graph, X=point[0], Y=point[1])
 
-    NOT YET IMPLEMENTED — requires HazardSimulator (Phase 4) to define:
-    - What "revealed" conditions look like at each step
-    - The observation/reveal radius mechanism
-    - Episode termination on flood encounter
 
-    This stub exists as a placeholder and raises NotImplementedError.
-    """
-    raise NotImplementedError(
-        "dynamic_shortest_path_with_replanning requires HazardSimulator (Phase 4). "
-        "Will be implemented when the environment's observation/reveal model is defined."
+def _edges_within_hops(graph, node, radius: int) -> set[tuple]:
+    """Return all directed edge IDs touching nodes in the local view."""
+    undirected = graph.to_undirected(as_view=True)
+    visible_nodes = nx.single_source_shortest_path_length(
+        undirected, node, cutoff=radius
     )
+    return {
+        (u, v, key)
+        for u, v, key in graph.edges(keys=True)
+        if u in visible_nodes or v in visible_nodes
+    }
+
+
+def _traffic_multiplier(traffic_lookup, data, hour, is_weekend):
+    highway_class = data.get("highway_class", "unclassified")
+    lookup_key = (highway_class, hour, is_weekend)
+    multiplier = traffic_lookup.get(lookup_key, 1.0)
+    if lookup_key not in traffic_lookup:
+        logger.warning(
+            "Missing traffic profile for %s; falling back to 1.0", lookup_key
+        )
+    return multiplier
+
+
+def _best_edge(graph, u, v):
+    edge_data = graph.get_edge_data(u, v)
+    if not edge_data:
+        raise nx.NetworkXNoPath(f"No edge exists between {u!r} and {v!r}")
+    return min(
+        edge_data.items(),
+        key=lambda item: item[1].get("dynamic_cost", float("inf")),
+    )
+
+def dynamic_shortest_path_with_replanning(
+    graph, hazard_sim, traffic_lookup, origin, destination,
+    hour, is_weekend, cost_cfg, reveal_radius_hops, max_steps,
+) -> dict:
+    """Replan one hop at a time using locally revealed flood realizations.
+
+    ``max_steps`` is retained for API compatibility, but the authoritative
+    cap is ``hazard_sim.config['env']['max_episode_steps']`` so this baseline
+    follows the same episode limit as the environment.
+    """
+    current = _nearest_node(graph, origin)
+    dest_node = _nearest_node(graph, destination)
+    configured_max_steps = hazard_sim.config.get("env", {}).get(
+        "max_episode_steps", max_steps
+    )
+    if configured_max_steps is None:
+        configured_max_steps = max_steps
+    if configured_max_steps is None or configured_max_steps <= 0:
+        raise ValueError("env.max_episode_steps must be a positive integer")
+    max_steps = int(configured_max_steps)
+    path, total_realized_time, step = [current], 0.0, 0
+
+    while current != dest_node and step < max_steps:
+        hazard_sim.set_current_position(current)
+        hazard_sim.maybe_trigger_event(step)
+
+        # Re-plan from scratch each step using best current knowledge:
+        # true ground truth for edges within reveal_radius_hops of `current`,
+        # static predicted flood_susceptibility everywhere else.
+        # Radius zero means no new flood information before commitment.
+        nearby_edges = (
+            _edges_within_hops(graph, current, reveal_radius_hops)
+            if reveal_radius_hops > 0
+            else set()
+        )
+        reveal_overrides = {}
+        for edge_id in nearby_edges:
+            reveal_overrides[edge_id] = hazard_sim.is_flooded(*edge_id)
+        annotate_dynamic_costs(
+            graph, traffic_lookup, hour, is_weekend, cost_cfg,
+            reveal_overrides=reveal_overrides,
+        )
+        try:
+            next_hop_path = nx.shortest_path(
+                graph, current, dest_node, weight="dynamic_cost"
+            )
+        except nx.NetworkXNoPath:
+            break
+        next_node = next_hop_path[1]
+        best_key, best_edge = _best_edge(graph, current, next_node)
+
+        # Move first, then query the traversed edge from the new position. This
+        # also makes radius zero a true no-lookahead mode.
+        hazard_sim.set_current_position(next_node)
+        is_flooded = hazard_sim.is_flooded(current, next_node, best_key)
+        traffic_mult = _traffic_multiplier(
+            traffic_lookup, best_edge, hour, is_weekend
+        )
+        base_travel_time = best_edge.get("travel_time", 0.0)
+        road_quality_score = best_edge.get("road_quality_score", 1.0)
+        flood_penalty_seconds = float(
+            hazard_sim.config.get("env", {}).get("flood_penalty", 50)
+        ) * 60.0
+        realized_time = effective_travel_time(
+            base_travel_time=base_travel_time,
+            traffic_multiplier=traffic_mult,
+            flood_susceptibility=0.0,
+            road_quality_score=road_quality_score,
+            flood_weight=cost_cfg.flood_weight,
+            quality_penalty_weight=cost_cfg.quality_penalty_weight,
+        ) + (flood_penalty_seconds if is_flooded else 0.0)
+
+        total_realized_time += realized_time
+        current, path, step = next_node, path + [next_node], step + 1
+
+    return {
+        "path": path, "total_realized_time": total_realized_time,
+        "reached_destination": current == dest_node, "steps": step,
+    }
 
 
 if __name__ == "__main__":

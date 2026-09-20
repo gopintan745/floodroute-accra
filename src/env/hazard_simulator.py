@@ -159,15 +159,21 @@ class HazardSimulator:
                 newly_flooded.append(edge_id)
         return newly_flooded
 
-    def is_flooded(self, u, v, k) -> bool | None:
-        """Return local ground truth, or ``None`` for an unrevealed edge.
+    def is_flooded(self, u, v, k) -> bool:
+        """Return ground truth for an edge inside the local reveal radius.
 
         The environment must call :meth:`set_current_position` whenever the
         driver moves. An edge is revealed when either endpoint is within the
         configured undirected hop radius of that position.
+
+        Queries outside the local view raise instead of returning a value that
+        could be mistaken for a known dry edge.
         """
         if not self._episode_reset:
             raise RuntimeError("reset_episode() must be called before is_flooded()")
         if not self._edge_is_revealed(u, v):
-            return None
+            raise RuntimeError(
+                f"edge {(u, v, k)!r} is outside the current reveal radius "
+                f"of {self.reveal_radius_hops} hops"
+            )
         return (u, v, k) in self.flooded_edges

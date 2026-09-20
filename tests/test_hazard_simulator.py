@@ -91,7 +91,8 @@ def test_reveal_radius_exposes_nearby_edges_only():
 
     assert simulator.is_flooded("a", "b", 0) is False
     assert simulator.is_flooded("b", "c", 0) is True
-    assert simulator.is_flooded("c", "d", 0) is None
+    with pytest.raises(RuntimeError, match="outside the current reveal radius"):
+        simulator.is_flooded("c", "d", 0)
 
 
 def test_position_must_be_set_before_local_query():

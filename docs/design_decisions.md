@@ -523,10 +523,10 @@ whole realized flood map, or return `False` for edges outside the local view.
 
 **Why this one:** Drivers can observe flooding on nearby streets before
 committing to them, but distant edges remain uncertain. `is_flooded()` returns
-`True` or `False` for visible edges and `None` for unrevealed edges, preserving
-the distinction between a known dry edge and an edge whose realized condition
-is still hidden. Undirected graph distance models local visibility across an
-intersection regardless of travel direction.
+`True` or `False` for visible edges and raises for unrevealed edges, preventing
+callers from confusing an unavailable observation with a known dry edge.
+Undirected graph distance models local visibility across an intersection
+regardless of travel direction.
 
 **What would change my mind:** Evidence that a fixed hop radius poorly models
 the observation distance, in which case a metric or road-class-aware radius

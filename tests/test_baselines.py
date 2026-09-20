@@ -15,10 +15,12 @@ import pandas as pd
 from src.baselines.dijkstra_static import static_shortest_path
 from src.baselines.dijkstra_dynamic import (
     dynamic_shortest_path,
+    dynamic_shortest_path_with_replanning,
     build_traffic_lookup,
     annotate_dynamic_costs,
 )
 from src.common.cost_model import CostModelConfig, effective_travel_time
+from src.env.hazard_simulator import HazardSimulator
 
 
 # --------------------------------------------------------------------------
@@ -314,6 +316,180 @@ def test_traffic_lookup_fallback():
         # At hour 14 (not in profile), traffic_mult should be 1.0
         # base_tt=3.3/6.7/5.0/5.0/10.0, traffic=1.0, flood=0.9/0.0, quality=1.0
         # cost = base * 1.0 * (1 + 0.5*flood) * 1.0
+
+
+def test_revealed_override_replaces_static_susceptibility():
+    graph = _make_tiny_graph()
+    traffic_lookup = build_traffic_lookup(_make_traffic_profile())
+    cfg = _make_cost_config(flood_weight=2.0)
+
+    annotate_dynamic_costs(
+        graph,
+        traffic_lookup,
+        hour=12,
+        is_weekend=False,
+        cost_cfg=cfg,
+        reveal_overrides={(1, 3, 0): False},
+    )
+    dry_cost = graph[1][3][0]["dynamic_cost"]
+
+    annotate_dynamic_costs(
+        graph,
+        traffic_lookup,
+        hour=12,
+        is_weekend=False,
+        cost_cfg=cfg,
+        reveal_overrides={(1, 3, 0): None},
+    )
+    predicted_cost = graph[1][3][0]["dynamic_cost"]
+
+    assert dry_cost < predicted_cost
+
+
+def test_replanning_uses_configured_step_cap_and_reaches_destination():
+    graph = _make_tiny_graph()
+    config = {
+        "env": {
+            "train_flood_day_rate": 0.0,
+            "mid_episode_event_base_rate": 0.0,
+            "reveal_radius_hops": 1,
+            "max_episode_steps": 10,
+            "flood_penalty": 50,
+        }
+    }
+    hazard_sim = HazardSimulator(
+        graph,
+        {"monthly_heavy_rain_frequency": [0.0] * 12},
+        config,
+        mode="train",
+        seed=21,
+    )
+    hazard_sim.reset_episode()
+
+    result = dynamic_shortest_path_with_replanning(
+        graph=graph,
+        hazard_sim=hazard_sim,
+        traffic_lookup=build_traffic_lookup(_make_traffic_profile()),
+        origin=(0.0, 0.0),
+        destination=(0.01, 0.0),
+        hour=12,
+        is_weekend=False,
+        cost_cfg=_make_cost_config(),
+        reveal_radius_hops=1,
+        max_steps=1,
+    )
+
+    assert result["reached_destination"] is True
+    assert result["steps"] == 2
+    assert result["total_realized_time"] > 0
+
+
+def test_replanning_changes_route_when_next_edge_floods():
+    graph = nx.MultiDiGraph()
+    graph.graph["crs"] = "EPSG:4326"
+    positions = {1: (0.0, 0.0), 2: (0.003, 0.0), 3: (0.006, 0.0),
+                 4: (0.003, 0.01), 5: (0.006, 0.01)}
+    for node, (x, y) in positions.items():
+        graph.add_node(node, x=x, y=y)
+    edge_defaults = {
+        "length": 1.0,
+        "road_quality_score": 1.0,
+        "highway_class": "primary",
+    }
+    graph.add_edge(1, 2, key=0, travel_time=1.0, flood_risk=0.0,
+                   flood_susceptibility=0.0, **edge_defaults)
+    graph.add_edge(2, 3, key=0, travel_time=1.0, flood_risk=0.0,
+                   flood_susceptibility=1.0, **edge_defaults)
+    graph.add_edge(2, 4, key=0, travel_time=2.0, flood_risk=0.0,
+                   flood_susceptibility=0.0, **edge_defaults)
+    graph.add_edge(4, 5, key=0, travel_time=2.0, flood_risk=0.0,
+                   flood_susceptibility=0.0, **edge_defaults)
+    graph.add_edge(5, 3, key=0, travel_time=2.0, flood_risk=0.0,
+                   flood_susceptibility=0.0, **edge_defaults)
+
+    class FloodsAfterFirstPlan(HazardSimulator):
+        def __init__(self):
+            super().__init__(
+                graph,
+                {"monthly_heavy_rain_frequency": [0.0] * 12},
+                {"env": {"reveal_radius_hops": 1, "max_episode_steps": 10,
+                          "mid_episode_event_base_rate": 0.0, "flood_penalty": 50}},
+                "train",
+                seed=1,
+            )
+            self.reset_episode()
+            self.is_flood_day = True
+            self.event_calls = 0
+
+        def maybe_trigger_event(self, step):
+            self.event_calls += 1
+            if self.event_calls == 2:
+                self.flooded_edges.add((2, 3, 0))
+                return [(2, 3, 0)]
+            return []
+
+    hazard_sim = FloodsAfterFirstPlan()
+    result = dynamic_shortest_path_with_replanning(
+        graph=graph,
+        hazard_sim=hazard_sim,
+        traffic_lookup=build_traffic_lookup(_make_traffic_profile()),
+        origin=(0.0, 0.0),
+        destination=(0.006, 0.0),
+        hour=12,
+        is_weekend=False,
+        cost_cfg=_make_cost_config(flood_weight=10.0),
+        reveal_radius_hops=1,
+        max_steps=10,
+    )
+
+    assert result["path"][:2] == [1, 2]
+    assert result["path"] != [1, 2, 3]
+    assert result["path"][-1] == 3
+
+
+def test_zero_reveal_radius_matches_one_shot_route():
+    graph = _make_tiny_graph()
+    traffic_profile = _make_traffic_profile()
+    config = {
+        "env": {
+            "train_flood_day_rate": 0.0,
+            "mid_episode_event_base_rate": 0.0,
+            "reveal_radius_hops": 0,
+            "max_episode_steps": 10,
+            "flood_penalty": 50,
+        }
+    }
+    hazard_sim = HazardSimulator(
+        graph,
+        {"monthly_heavy_rain_frequency": [0.0] * 12},
+        config,
+        "train",
+        seed=22,
+    )
+    hazard_sim.reset_episode()
+    result = dynamic_shortest_path_with_replanning(
+        graph=graph,
+        hazard_sim=hazard_sim,
+        traffic_lookup=build_traffic_lookup(traffic_profile),
+        origin=(0.0, 0.0),
+        destination=(0.01, 0.0),
+        hour=12,
+        is_weekend=False,
+        cost_cfg=_make_cost_config(flood_weight=2.0),
+        reveal_radius_hops=0,
+        max_steps=10,
+    )
+    one_shot = dynamic_shortest_path(
+        graph,
+        traffic_profile,
+        (0.0, 0.0),
+        (0.01, 0.0),
+        12,
+        False,
+        _make_cost_config(flood_weight=2.0),
+    )
+
+    assert result["path"] == one_shot["path"]
 
 
 def test_traffic_lookup_fallback_in_full_pipeline():
