@@ -485,6 +485,32 @@ flood_multiplier   = 1 + flood_weight * flood_susceptibility
 
 ---
 
+## 2026-09-20 - Flood realization and evaluation sampling
+
+**Decision:** Train-mode episodes oversample flood days at 35%, while
+eval-mode episodes use the month-specific climatology rate. Months are sampled
+uniformly in both modes, and flooding is an additive penalty rather than an
+impassable edge.
+
+**Alternatives considered:** Use the climatology rate during training, weight
+month selection by climatology, or block movement across flooded edges.
+
+**Why this one:** Oversampling gives the agent enough flood exposure to learn
+avoidance; using the true climatology in evaluation preserves an honest
+performance estimate. Uniform month sampling avoids double-counting
+seasonality, and additive penalties avoid stuck episodes when every remaining
+route is flooded.
+
+**Consequence:** Training and evaluation rewards are not directly comparable;
+only eval-mode results are project performance. Future
+`evaluation/run_scenarios.py` must instantiate `HazardSimulator(mode="eval")`.
+
+**What would change my mind:** Evaluation distributions that remain badly
+calibrated after validation, or evidence that additive penalties fail to
+produce useful avoidance behavior.
+
+---
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):
