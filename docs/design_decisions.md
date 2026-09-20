@@ -511,11 +511,33 @@ produce useful avoidance behavior.
 
 ---
 
+## 2026-09-20 - Local flood observability radius
+
+**Decision:** The simulator exposes realized flood state only for edges whose
+source or destination node is within `env.reveal_radius_hops` undirected graph
+hops of the driver's current node. The environment must call
+`set_current_position()` after each movement before querying local hazards.
+
+**Alternatives considered:** Reveal only the edge being traversed, expose the
+whole realized flood map, or return `False` for edges outside the local view.
+
+**Why this one:** Drivers can observe flooding on nearby streets before
+committing to them, but distant edges remain uncertain. `is_flooded()` returns
+`True` or `False` for visible edges and `None` for unrevealed edges, preserving
+the distinction between a known dry edge and an edge whose realized condition
+is still hidden. Undirected graph distance models local visibility across an
+intersection regardless of travel direction.
+
+**What would change my mind:** Evidence that a fixed hop radius poorly models
+the observation distance, in which case a metric or road-class-aware radius
+could replace it.
+
+---
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):
 
 - Fixed max-degree action space vs. candidate-node-list action encoding
-- How much of the graph is "locally observable" at each step (reveal radius)
 - How road-quality labels were produced given no systematic dataset
 - Reward weighting between travel time and flood penalty
