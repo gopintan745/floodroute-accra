@@ -332,7 +332,9 @@ The example template (`config.example.yaml`) was never updated to match either b
 
 ```python
 effective_travel_time = base_travel_time * traffic_multiplier * quality_multiplier * flood_multiplier
+where
 quality_multiplier = 1 + (1 - road_quality_score) * quality_penalty_weight
+and
 flood_multiplier   = 1 + flood_weight * flood_susceptibility
 ```
 

@@ -6,6 +6,7 @@ torch>=2.2
 # Graph / routing
 networkx>=3.2
 osmnx>=1.9
+scikit-learn>=1.4
 
 # Geospatial / hazard layers
 rasterio>=1.3
