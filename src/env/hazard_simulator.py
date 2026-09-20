@@ -26,6 +26,7 @@ class HazardSimulator:
         self.config = config
         self.mode = mode
         self.rng = np.random.default_rng(seed)
+        self.reveal_radius_hops = self._read_reveal_radius()
         self.flood_susceptibility = {
             (u, v, key): self._edge_susceptibility(data)
             for u, v, key, data in graph.edges(keys=True, data=True)
@@ -33,6 +34,7 @@ class HazardSimulator:
         self.flooded_edges: set[tuple] = set()
         self.step = 0
         self.is_flood_day = False
+        self.current_position = None
         self._episode_reset = False
 
     @staticmethod
@@ -48,6 +50,14 @@ class HazardSimulator:
 
     def _env_value(self, key: str, default=None):
         return self.config.get("env", {}).get(key, default)
+
+    def _read_reveal_radius(self) -> int:
+        radius = self._env_value("reveal_radius_hops", 1)
+        if isinstance(radius, bool) or not isinstance(radius, (int, np.integer)):
+            raise ValueError(f"reveal_radius_hops must be a non-negative integer, got {radius!r}")
+        if radius < 0:
+            raise ValueError(f"reveal_radius_hops must be a non-negative integer, got {radius}")
+        return int(radius)
 
     def _monthly_flood_fraction(self, month: int) -> float:
         if "by_month" in self.climatology:
@@ -90,6 +100,7 @@ class HazardSimulator:
         self.is_flood_day = bool(self.rng.random() < flood_rate)
         self.flooded_edges = set()
         self.step = 0
+        self.current_position = None
         self._episode_reset = True
         if self.is_flood_day:
             self.flooded_edges = {
@@ -103,6 +114,29 @@ class HazardSimulator:
             "is_weekend": is_weekend,
             "is_flood_day": self.is_flood_day,
         }
+
+    def set_current_position(self, node) -> None:
+        """Set the driver's current graph node before querying local hazards."""
+        if not self._episode_reset:
+            raise RuntimeError(
+                "reset_episode() must be called before set_current_position()"
+            )
+        if node not in self.graph:
+            raise ValueError(f"current position {node!r} is not a node in the graph")
+        self.current_position = node
+
+    def _edge_is_revealed(self, u, v) -> bool:
+        if self.current_position is None:
+            raise RuntimeError(
+                "set_current_position() must be called before is_flooded()"
+            )
+        if self.current_position not in self.graph:
+            raise RuntimeError("current position is no longer present in the graph")
+        undirected = self.graph.to_undirected(as_view=True)
+        distances = nx.single_source_shortest_path_length(
+            undirected, self.current_position, cutoff=self.reveal_radius_hops
+        )
+        return u in distances or v in distances
 
     def maybe_trigger_event(self, step: int) -> list:
         """Activate additional flooding before the edge chosen at ``step``."""
@@ -125,8 +159,15 @@ class HazardSimulator:
                 newly_flooded.append(edge_id)
         return newly_flooded
 
-    def is_flooded(self, u, v, k) -> bool:
-        """Return ground truth for one edge after the episode has been reset."""
+    def is_flooded(self, u, v, k) -> bool | None:
+        """Return local ground truth, or ``None`` for an unrevealed edge.
+
+        The environment must call :meth:`set_current_position` whenever the
+        driver moves. An edge is revealed when either endpoint is within the
+        configured undirected hop radius of that position.
+        """
         if not self._episode_reset:
             raise RuntimeError("reset_episode() must be called before is_flooded()")
+        if not self._edge_is_revealed(u, v):
+            return None
         return (u, v, k) in self.flooded_edges

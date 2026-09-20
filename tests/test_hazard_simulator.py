@@ -13,7 +13,13 @@ def _graph():
 
 
 def _config():
-    return {"env": {"train_flood_day_rate": 0.35, "mid_episode_event_base_rate": 1.0}}
+    return {
+        "env": {
+            "train_flood_day_rate": 0.35,
+            "mid_episode_event_base_rate": 1.0,
+            "reveal_radius_hops": 1,
+        }
+    }
 
 
 def _climatology():
@@ -40,7 +46,13 @@ def test_same_seed_reproduces_resets_and_events():
 
 
 def test_non_flood_day_stays_clean():
-    simulator = HazardSimulator(_graph(), _climatology(), {"env": {"train_flood_day_rate": 0.0}}, "train", seed=1)
+    simulator = HazardSimulator(
+        _graph(),
+        _climatology(),
+        {"env": {"train_flood_day_rate": 0.0, "reveal_radius_hops": 1}},
+        "train",
+        seed=1,
+    )
     result = simulator.reset_episode()
 
     assert result["is_flood_day"] is False
@@ -59,6 +71,7 @@ def test_flooding_is_monotonic():
     simulator.maybe_trigger_event(2)
 
     assert flooded_after_first_event <= simulator.flooded_edges
+    simulator.set_current_position("a")
     assert simulator.is_flooded("a", "b", 0)
 
 
@@ -66,4 +79,24 @@ def test_is_flooded_requires_reset():
     simulator = HazardSimulator(_graph(), _climatology(), _config(), "train", seed=3)
 
     with pytest.raises(RuntimeError, match="reset_episode"):
+        simulator.is_flooded("a", "b", 0)
+
+
+def test_reveal_radius_exposes_nearby_edges_only():
+    simulator = HazardSimulator(_graph(), _climatology(), _config(), "train", seed=4)
+    simulator.reset_episode()
+    simulator.is_flood_day = True
+    simulator.flooded_edges = {("b", "c", 0), ("c", "d", 0)}
+    simulator.set_current_position("a")
+
+    assert simulator.is_flooded("a", "b", 0) is False
+    assert simulator.is_flooded("b", "c", 0) is True
+    assert simulator.is_flooded("c", "d", 0) is None
+
+
+def test_position_must_be_set_before_local_query():
+    simulator = HazardSimulator(_graph(), _climatology(), _config(), "train", seed=5)
+    simulator.reset_episode()
+
+    with pytest.raises(RuntimeError, match="set_current_position"):
         simulator.is_flooded("a", "b", 0)
