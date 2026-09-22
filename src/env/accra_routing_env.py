@@ -70,6 +70,10 @@ class AccraRoutingEnv(gym.Env):
         self.graph_wrapper = GraphWrapper(self.graph, max_degree=env_cfg.get("max_degree"))
         self.max_degree = self.graph_wrapper.max_degree
         self.action_space = spaces.Discrete(self.max_degree)
+        self._current_node = None
+        self._destination_node = None
+        self._origin_node = None
+        self._step_count = 0
 
         self.traffic_profile = self._load_traffic_profile(traffic_profile_path)
         self.traffic_lookup = self._build_traffic_lookup(self.traffic_profile)
@@ -145,6 +149,8 @@ class AccraRoutingEnv(gym.Env):
 
     def action_masks(self) -> list[bool]:
         """Exact method name expected by sb3-contrib MaskablePPO."""
+        if self._current_node is None:
+            return [False] * self.max_degree
         return self.graph_wrapper.action_mask(self._current_node)
 
     def _node_features(self, node) -> np.ndarray:
