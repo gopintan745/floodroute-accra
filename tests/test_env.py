@@ -171,6 +171,34 @@ def test_partial_observability_boundary():
     assert outside_feature[0] == 0.25
 
 
+def test_reset_samples_only_directly_reachable_destinations():
+    graph = nx.MultiDiGraph()
+    for node, coords in {
+        "start": (0.0, 0.0),
+        "reachable": (0.0, 1.0),
+        "sink": (0.0, 2.0),
+        "disconnected": (1.0, 0.0),
+    }.items():
+        graph.add_node(node, x=coords[0], y=coords[1])
+    for source, target in [("start", "reachable"), ("reachable", "sink")]:
+        graph.add_edge(
+            source,
+            target,
+            key=0,
+            travel_time=1.0,
+            highway_class="residential",
+            flood_risk=0.0,
+            road_quality_score=1.0,
+        )
+
+    env = _make_env_with_graph(graph)
+    for seed in range(20):
+        _, info = env.reset(seed=seed)
+        assert nx.has_path(graph, info["origin"], info["destination"])
+        assert info["origin"] != "sink"
+        assert info["origin"] != "disconnected"
+
+
 def test_reward_reduces_correctly_on_boring_episode():
     graph = nx.MultiDiGraph()
     for node, coords in {"start": (0.0, 0.0), "mid": (0.0, 1.0), "far": (0.0, 2.0)}.items():

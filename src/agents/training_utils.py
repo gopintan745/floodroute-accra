@@ -121,6 +121,34 @@ def evaluate_masked_random(
     return scores
 
 
+def evaluate_masked_random_outcomes(
+    env_factory: Callable[[], AccraRoutingEnv],
+    num_episodes: int = 20,
+    seed: int = 42,
+) -> list[dict]:
+    outcomes = []
+    for episode in range(num_episodes):
+        env = env_factory()
+        _, info = env.reset(seed=seed + episode)
+        rng = np.random.default_rng(seed + episode)
+        total_reward = 0.0
+        terminated = truncated = False
+        final_info = {}
+        while not (terminated or truncated):
+            valid_actions = np.flatnonzero(env.action_masks())
+            action = int(rng.choice(valid_actions))
+            _, reward, terminated, truncated, final_info = env.step(action)
+            total_reward += reward
+        outcomes.append({
+            "reward": float(total_reward),
+            "success": bool(final_info.get("success", False)),
+            "dead_end": bool(final_info.get("dead_end", False)),
+            "truncated": bool(final_info.get("truncated", False)),
+            "flood_day": bool(info["is_flood_day"]),
+        })
+    return outcomes
+
+
 def evaluate_model(
     model,
     graph: nx.MultiDiGraph,
@@ -148,6 +176,59 @@ def evaluate_model(
         scores.append(total_reward)
     eval_env.close()
     return scores
+
+
+def evaluate_model_outcomes(
+    model,
+    graph: nx.MultiDiGraph,
+    config: dict,
+    vecnormalize_path: str | Path,
+    num_episodes: int = 20,
+    seed: int = 42,
+) -> list[dict]:
+    eval_env = make_vec_env(make_env_factory(graph, config, mode="eval"), n_envs=1)
+    eval_env = VecNormalize.load(vecnormalize_path, eval_env)
+    eval_env.training = False
+    eval_env.norm_reward = False
+    outcomes = []
+    for episode in range(num_episodes):
+        eval_env.seed(seed + episode)
+        observations = eval_env.reset()
+        total_reward = 0.0
+        final_info = {}
+        for _ in range(int(config.get("env", {}).get("max_episode_steps", 200))):
+            action, _ = model.predict(
+                observations,
+                deterministic=True,
+                action_masks=get_action_masks(eval_env),
+            )
+            observations, rewards, dones, infos = eval_env.step(action)
+            total_reward += float(rewards[0])
+            final_info = infos[0]
+            if dones[0]:
+                break
+        outcomes.append({
+            "reward": float(total_reward),
+            "success": bool(final_info.get("success", False)),
+            "dead_end": bool(final_info.get("dead_end", False)),
+            "truncated": bool(final_info.get("truncated", False)),
+            "flood_day": bool(final_info.get("is_flood_day", False)),
+        })
+    eval_env.close()
+    return outcomes
+
+
+def summarize_outcomes(outcomes: list[dict]) -> dict:
+    if not outcomes:
+        return {"episodes": 0, "completion_rate": 0.0}
+    return {
+        "episodes": len(outcomes),
+        "completion_rate": float(np.mean([item["success"] for item in outcomes])),
+        "dead_end_rate": float(np.mean([item["dead_end"] for item in outcomes])),
+        "truncation_rate": float(np.mean([item["truncated"] for item in outcomes])),
+        "flood_day_rate": float(np.mean([item["flood_day"] for item in outcomes])),
+        "mean_reward": float(np.mean([item["reward"] for item in outcomes])),
+    }
 
 
 def evaluate_static_shortest_path(
@@ -184,6 +265,50 @@ def evaluate_static_shortest_path(
                 break
         scores.append(total_reward)
     return scores
+
+
+def evaluate_static_shortest_path_outcomes(
+    env_factory: Callable[[], AccraRoutingEnv],
+    num_episodes: int = 20,
+    seed: int = 42,
+) -> list[dict]:
+    outcomes = []
+    for episode in range(num_episodes):
+        env = env_factory()
+        _, info = env.reset(seed=seed + episode)
+        try:
+            path = nx.shortest_path(
+                env.graph,
+                info["origin"],
+                info["destination"],
+                weight=_travel_time_weight,
+            )
+        except nx.NetworkXNoPath:
+            outcomes.append({"reward": 0.0, "success": False, "dead_end": False, "truncated": False, "flood_day": bool(info["is_flood_day"])})
+            continue
+        total_reward = 0.0
+        final_info = {}
+        for source, target in zip(path[:-1], path[1:]):
+            env._current_node = source
+            env.hazard_sim.set_current_position(source)
+            action = next(
+                index
+                for index in range(env.action_space.n)
+                if env.graph_wrapper.action_to_edge(source, index)
+                and env.graph_wrapper.action_to_edge(source, index)[1] == target
+            )
+            _, reward, terminated, truncated, final_info = env.step(action)
+            total_reward += reward
+            if terminated or truncated:
+                break
+        outcomes.append({
+            "reward": float(total_reward),
+            "success": bool(final_info.get("success", False)),
+            "dead_end": bool(final_info.get("dead_end", False)),
+            "truncated": bool(final_info.get("truncated", False)),
+            "flood_day": bool(info["is_flood_day"]),
+        })
+    return outcomes
 
 
 def summarize_sanity_checks(

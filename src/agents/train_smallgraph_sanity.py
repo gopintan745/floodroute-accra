@@ -13,14 +13,18 @@ from src.agents.training_utils import (
     MODELS_DIR,
     RESULTS_LOGS_DIR,
     evaluate_masked_random,
+    evaluate_masked_random_outcomes,
     evaluate_model,
+    evaluate_model_outcomes,
     evaluate_static_shortest_path,
+    evaluate_static_shortest_path_outcomes,
     load_config,
     load_graph,
     make_env_factory,
     make_normalized_vec_env,
     resolve_center_node,
     save_training_artifacts,
+    summarize_outcomes,
     summarize_sanity_checks,
 )
 
@@ -58,10 +62,22 @@ def main(config_path: str | Path | None = None):
     static_scores = evaluate_static_shortest_path(eval_factory, seed=int(config.get("evaluation", {}).get("seed", 42)))
     trained_scores = evaluate_model(model, subgraph, eval_config, vecnormalize_path, seed=int(config.get("evaluation", {}).get("seed", 42)))
     checks = summarize_sanity_checks(trained_scores, random_scores, static_scores)
+    checks["trained_eval_outcomes"] = summarize_outcomes(
+        evaluate_model_outcomes(model, subgraph, eval_config, vecnormalize_path, seed=int(config.get("evaluation", {}).get("seed", 42)))
+    )
+    checks["masked_random_eval_outcomes"] = summarize_outcomes(
+        evaluate_masked_random_outcomes(eval_factory, seed=int(config.get("evaluation", {}).get("seed", 42)))
+    )
+    checks["static_shortest_path_eval_outcomes"] = summarize_outcomes(
+        evaluate_static_shortest_path_outcomes(eval_factory, seed=int(config.get("evaluation", {}).get("seed", 42)))
+    )
     for name, value in checks.items():
         logger.info("sanity_check.%s=%s", name, value)
     report_path = output_dir / "sanity_checks.json"
     report_path.write_text(json.dumps(checks, indent=2), encoding="utf-8")
+    (RESULTS_LOGS_DIR / "completion_rate_report.json").write_text(
+        json.dumps(checks, indent=2), encoding="utf-8"
+    )
     if not checks["trained_beats_masked_random"]:
         raise RuntimeError(
             "Sanity training did not beat the masked-random baseline; "

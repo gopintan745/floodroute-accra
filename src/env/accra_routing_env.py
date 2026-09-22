@@ -69,6 +69,7 @@ class AccraRoutingEnv(gym.Env):
             self.graph = graph_path.copy()
         else:
             self.graph = nx.read_graphml(graph_path)
+        self._reachable_destinations = {}
         env_cfg = self.config.get("env", {})
         self.graph_wrapper = GraphWrapper(self.graph, max_degree=env_cfg.get("max_degree"))
         self.max_degree = self.graph_wrapper.max_degree
@@ -216,13 +217,20 @@ class AccraRoutingEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         rng = np.random.default_rng(seed)
+        self.hazard_sim.rng = np.random.default_rng(seed)
         nodes = list(self.graph.nodes)
         if len(nodes) < 2:
             raise ValueError("At least two nodes are required for a routing episode")
-        self._origin_node = nodes[int(rng.integers(len(nodes)))]
-        self._destination_node = nodes[int(rng.integers(len(nodes)))]
-        while self._destination_node == self._origin_node and len(nodes) > 1:
-            self._destination_node = nodes[int(rng.integers(len(nodes)))]
+        self._reachable_destinations = {
+            node: tuple(destination for destination in nx.descendants(self.graph, node) if destination != node)
+            for node in nodes
+        }
+        valid_origins = [node for node in nodes if self._reachable_destinations[node]]
+        if not valid_origins:
+            raise ValueError("Graph has no directed origin-destination pair")
+        self._origin_node = valid_origins[int(rng.integers(len(valid_origins)))]
+        destinations = self._reachable_destinations[self._origin_node]
+        self._destination_node = destinations[int(rng.integers(len(destinations)))]
 
         self.episode_context = self.hazard_sim.reset_episode()
         self.hazard_sim.set_current_position(self._origin_node)
@@ -250,6 +258,7 @@ class AccraRoutingEnv(gym.Env):
                 info["terminated"] = True
                 info["truncated"] = False
                 info["dead_end"] = True
+                info["success"] = False
                 info["reward"] = reward
                 return obs, reward, True, False, info
             raise ValueError(f"masked invalid action {action} chosen at node {self._current_node!r}")
@@ -295,6 +304,8 @@ class AccraRoutingEnv(gym.Env):
         obs, info = self._build_observation()
         info["terminated"] = terminated
         info["truncated"] = truncated
+        info["dead_end"] = False
+        info["success"] = terminated
         info["reward"] = reward
         return obs, float(reward), bool(terminated), bool(truncated), info
 
