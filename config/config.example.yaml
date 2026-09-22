@@ -139,8 +139,10 @@ env:
   mid_episode_event_base_rate: 0.03 # per-step rate scaled by flood susceptibility
 
 training:
-  dqn:
-    total_timesteps: 200000
+  sanity_check:
+    total_timesteps: 50000
+    subgraph_radius: 3
+    center_node: null
   ppo:
     total_timesteps: 1000000
     n_envs: 4

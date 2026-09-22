@@ -12,7 +12,7 @@ feasibility study.
 - [ ] Phase 2 — Flood-risk and traffic layers built
 - [ ] Phase 3 — Baselines (static + dynamic Dijkstra) working
 - [ ] Phase 4 — Custom Gymnasium environment validated
-- [ ] Phase 5 — DQN sanity check on small subgraph
+- [ ] Phase 5 — MaskablePPO sanity check on small subgraph
 - [ ] Phase 5 — PPO trained on full study-area graph
 - [ ] Phase 6 — Evaluation against baselines complete
 - [ ] Phase 7 — Write-up

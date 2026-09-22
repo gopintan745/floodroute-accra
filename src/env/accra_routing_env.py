@@ -56,7 +56,7 @@ class AccraRoutingEnv(gym.Env):
 
     def __init__(
         self,
-        graph_path: str,
+        graph_path,
         traffic_profile_path: str,
         climatology_path: str,
         config: dict,
@@ -65,7 +65,10 @@ class AccraRoutingEnv(gym.Env):
         super().__init__()
         self.config = config or {}
         self.mode = mode
-        self.graph = nx.read_graphml(graph_path)
+        if isinstance(graph_path, nx.Graph):
+            self.graph = graph_path.copy()
+        else:
+            self.graph = nx.read_graphml(graph_path)
         env_cfg = self.config.get("env", {})
         self.graph_wrapper = GraphWrapper(self.graph, max_degree=env_cfg.get("max_degree"))
         self.max_degree = self.graph_wrapper.max_degree
@@ -151,7 +154,10 @@ class AccraRoutingEnv(gym.Env):
         """Exact method name expected by sb3-contrib MaskablePPO."""
         if self._current_node is None:
             return [False] * self.max_degree
-        return self.graph_wrapper.action_mask(self._current_node)
+        mask = self.graph_wrapper.action_mask(self._current_node)
+        # MaskablePPO cannot sample from an all-false mask. A sink is handled
+        # as a terminal failure in step(), so expose a dummy choice only there.
+        return mask if any(mask) else [True] * self.max_degree
 
     def _node_features(self, node) -> np.ndarray:
         node_data = self.graph.nodes[node]
@@ -235,6 +241,17 @@ class AccraRoutingEnv(gym.Env):
         action = int(action)
         edge = self.graph_wrapper.action_to_edge(self._current_node, action)
         if edge is None:
+            if not any(self.graph_wrapper.action_mask(self._current_node)):
+                self._step_count += 1
+                reward = -float(
+                    self.config.get("env", {}).get("dead_end_penalty", 50.0)
+                ) - float(self.config.get("env", {}).get("step_penalty", 0.1))
+                obs, info = self._build_observation()
+                info["terminated"] = True
+                info["truncated"] = False
+                info["dead_end"] = True
+                info["reward"] = reward
+                return obs, reward, True, False, info
             raise ValueError(f"masked invalid action {action} chosen at node {self._current_node!r}")
 
         self.hazard_sim.maybe_trigger_event(self._step_count)
