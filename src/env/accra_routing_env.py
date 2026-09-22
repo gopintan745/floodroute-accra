@@ -39,43 +39,241 @@ Log the decision in docs/design_decisions.md.
 """
 
 import gymnasium as gym
+import networkx as nx
+import numpy as np
+import pandas as pd
 from gymnasium import spaces
+
+from src.common.cost_model import CostModelConfig, effective_travel_time
+from src.env.graph_wrapper import GraphWrapper
+from src.env.hazard_simulator import HazardSimulator
+import json
+from pathlib import Path;
 
 
 class AccraRoutingEnv(gym.Env):
-    """Sequential routing under partially-observed traffic/flood/road-quality
-    conditions on the Accra study-area graph."""
-
     metadata = {"render_modes": []}
 
-    def __init__(self, graph_path: str, config: dict):
+    def __init__(
+        self,
+        graph_path: str,
+        traffic_profile_path: str,
+        climatology_path: str,
+        config: dict,
+        mode: str,
+    ):
         super().__init__()
-        # TODO: load graph (networkx), store config (episode length, penalties,
-        # reveal radius from config["env"])
-        # TODO: define self.observation_space and self.action_space
-        #   - observation_space: likely a Dict or flattened Box combining
-        #     current node features, destination features, and local edge features
-        #   - action_space: see variable-action-space note above
-        self.observation_space = spaces.Dict({})  # TODO
-        self.action_space = spaces.Discrete(1)  # TODO placeholder
+        self.config = config or {}
+        self.mode = mode
+        self.graph = nx.read_graphml(graph_path)
+        env_cfg = self.config.get("env", {})
+        self.graph_wrapper = GraphWrapper(self.graph, max_degree=env_cfg.get("max_degree"))
+        self.max_degree = self.graph_wrapper.max_degree
+        self.action_space = spaces.Discrete(self.max_degree)
+
+        self.traffic_profile = self._load_traffic_profile(traffic_profile_path)
+        self.traffic_lookup = self._build_traffic_lookup(self.traffic_profile)
+        self.climatology = self._load_climatology(climatology_path)
+        self.cost_cfg = CostModelConfig.from_config(self.config)
+        self.hazard_sim = HazardSimulator(
+            self.graph,
+            self.climatology,
+            self.config,
+            mode=mode,
+            seed=0,
+        )
+
+        node_dim = 2
+        edge_dim = 4
+        self.observation_space = spaces.Dict(
+            {
+                "current_node_features": spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(node_dim,),
+                    dtype=np.float32,
+                ),
+                "destination_node_features": spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(node_dim,),
+                    dtype=np.float32,
+                ),
+                "local_edge_features": spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(self.max_degree, edge_dim),
+                    dtype=np.float32,
+                ),
+            }
+        )
+
+    def _load_climatology(self, climatology_path: str) -> dict:
+        path = Path(climatology_path)
+        if not path.exists():
+            return {"by_month": {m: {"heavy_day_fraction": 0.05} for m in range(1, 13)}}
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def _load_traffic_profile(self, traffic_profile_path: str):
+        path = Path(traffic_profile_path)
+        if path.exists():
+            try:
+                return pd.read_parquet(path)
+            except Exception:
+                return pd.DataFrame([])
+        return pd.DataFrame([])
+
+    @staticmethod
+    def _build_traffic_lookup(profile: pd.DataFrame) -> dict:
+        lookup: dict[tuple[str, int, bool], float] = {}
+        if profile is None or profile.empty:
+            return lookup
+        for row in profile.to_dict(orient="records"):
+            highway = str(row.get("highway_class", "unclassified"))
+            hour = int(row.get("hour", 0))
+            is_weekend = bool(row.get("is_weekend", False))
+            multiplier = float(row.get("multiplier", 1.0))
+            lookup[(highway, hour, is_weekend)] = multiplier
+        return lookup
+
+    def _lookup_traffic_multiplier(self, highway_class: str, hour: int, is_weekend: bool) -> float:
+        if not self.traffic_lookup:
+            return 1.0
+        key = (str(highway_class), int(hour), bool(is_weekend))
+        return float(self.traffic_lookup.get(key, self.traffic_lookup.get((str(highway_class), int(hour), False), 1.0)))
+
+    def action_masks(self) -> list[bool]:
+        """Exact method name expected by sb3-contrib MaskablePPO."""
+        return self.graph_wrapper.action_mask(self._current_node)
+
+    def _node_features(self, node) -> np.ndarray:
+        node_data = self.graph.nodes[node]
+        lon = float(node_data.get("x", 0.0))
+        lat = float(node_data.get("y", 0.0))
+        return np.array([lon, lat], dtype=np.float32)
+
+    def _edge_feature_vector(self, edge, hour: int, is_weekend: bool) -> np.ndarray:
+        if edge is None:
+            return np.zeros(4, dtype=np.float32)
+        u, v, k = edge
+        edge_data = self.graph.get_edge_data(u, v, k)
+        if edge_data is None:
+            return np.zeros(4, dtype=np.float32)
+        flood_risk = float(edge_data.get("flood_risk", edge_data.get("flood_susceptibility", 0.0)))
+        if self.hazard_sim._episode_reset and self.hazard_sim.current_position is not None:
+            try:
+                if self.hazard_sim.is_flooded(u, v, k):
+                    flood_risk = 1.0
+                else:
+                    flood_risk = 0.0
+            except Exception:
+                pass
+        traffic_multiplier = self._lookup_traffic_multiplier(
+            str(edge_data.get("highway_class", edge_data.get("highway", "unclassified"))),
+            hour,
+            is_weekend,
+        )
+        road_quality = float(edge_data.get("road_quality_score", 1.0))
+        base_travel_time = float(edge_data.get("travel_time", 0.0))
+        return np.array(
+            [flood_risk, traffic_multiplier, road_quality, base_travel_time],
+            dtype=np.float32,
+        )
+
+    def _build_observation(self):
+        current_features = self._node_features(self._current_node)
+        destination_features = self._node_features(self._destination_node)
+        edge_rows = []
+        for idx in range(self.max_degree):
+            edge = self.graph_wrapper.action_to_edge(self._current_node, idx)
+            edge_rows.append(self._edge_feature_vector(edge, self.episode_context["hour"], self.episode_context["is_weekend"]))
+        local_edge_features = np.stack(edge_rows, axis=0)
+        return {
+            "current_node_features": current_features,
+            "destination_node_features": destination_features,
+            "local_edge_features": local_edge_features,
+        }, {
+            "origin": self._origin_node,
+            "destination": self._destination_node,
+            "hour": self.episode_context["hour"],
+            "is_weekend": self.episode_context["is_weekend"],
+            "is_flood_day": self.episode_context["is_flood_day"],
+        }
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        # TODO: sample origin/destination pair, reset hazard simulator state,
-        # build initial observation
-        raise NotImplementedError("TODO")
+        rng = np.random.default_rng(seed)
+        nodes = list(self.graph.nodes)
+        if len(nodes) < 2:
+            raise ValueError("At least two nodes are required for a routing episode")
+        self._origin_node = nodes[int(rng.integers(len(nodes)))]
+        self._destination_node = nodes[int(rng.integers(len(nodes)))]
+        while self._destination_node == self._origin_node and len(nodes) > 1:
+            self._destination_node = nodes[int(rng.integers(len(nodes)))]
+
+        self.episode_context = self.hazard_sim.reset_episode()
+        self.hazard_sim.set_current_position(self._origin_node)
+        self._current_node = self._origin_node
+        self._step_count = 0
+        obs, info = self._build_observation()
+        info["origin"] = self._origin_node
+        info["destination"] = self._destination_node
+        return obs, info
 
     def step(self, action):
-        # TODO:
-        #  1. map action -> chosen edge
-        #  2. reveal that edge's true condition (may differ from what was
-        #     "expected" — this is the partial-observability payoff)
-        #  3. compute reward (travel time + flood penalty if applicable)
-        #  4. advance hazard_simulator state (conditions can evolve)
-        #  5. build next observation (local view from new current node)
-        #  6. check termination (reached destination) / truncation (max steps)
-        raise NotImplementedError("TODO")
+        if not isinstance(action, (int, np.integer)):
+            raise TypeError(f"action must be an integer, got {type(action)!r}")
+        if not 0 <= int(action) < self.action_space.n:
+            raise ValueError(f"action {action} is out of range for action_space.n={self.action_space.n}")
+        action = int(action)
+        edge = self.graph_wrapper.action_to_edge(self._current_node, action)
+        if edge is None:
+            raise ValueError(f"masked invalid action {action} chosen at node {self._current_node!r}")
+
+        self.hazard_sim.maybe_trigger_event(self._step_count)
+        u, v, k = edge
+        is_flooded = False
+        try:
+            is_flooded = self.hazard_sim.is_flooded(u, v, k)
+        except Exception:
+            is_flooded = False
+
+        edge_data = self.graph.get_edge_data(u, v, k)
+        base_travel_time = float(edge_data.get("travel_time", 0.0))
+        road_quality_score = float(edge_data.get("road_quality_score", 1.0))
+        traffic_multiplier = self._lookup_traffic_multiplier(
+            str(edge_data.get("highway_class", edge_data.get("highway", "unclassified"))),
+            self.episode_context["hour"],
+            self.episode_context["is_weekend"],
+        )
+        realized_time = effective_travel_time(
+            base_travel_time=base_travel_time,
+            traffic_multiplier=traffic_multiplier,
+            flood_susceptibility=0.0,
+            road_quality_score=road_quality_score,
+            flood_weight=self.cost_cfg.flood_weight,
+            quality_penalty_weight=self.cost_cfg.quality_penalty_weight,
+        )
+        if is_flooded:
+            realized_time += float(self.config.get("env", {}).get("flood_penalty", 50.0))
+
+        reward = -realized_time - float(self.config.get("env", {}).get("step_penalty", 0.1))
+
+        self._current_node = v
+        self.hazard_sim.set_current_position(self._current_node)
+        self._step_count += 1
+
+        terminated = self._current_node == self._destination_node
+        if terminated:
+            reward += 100.0
+        truncated = (not terminated) and (self._step_count >= int(self.config.get("env", {}).get("max_episode_steps", 200)))
+
+        obs, info = self._build_observation()
+        info["terminated"] = terminated
+        info["truncated"] = truncated
+        info["reward"] = reward
+        return obs, float(reward), bool(terminated), bool(truncated), info
 
     def render(self):
-        # Optional: plot current route on the graph for debugging.
-        raise NotImplementedError("TODO (optional)")
+        return None

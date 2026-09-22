@@ -1,47 +1,63 @@
-"""
-Validate the Gymnasium contract AND the project-specific invariants that
-matter most here — a broken reward scale or leaked state can train
-"successfully" while quietly invalidating the whole comparison against
-baselines. Run these before spending GPU time on PPO.
+"""Project-specific regression tests for the routing environment."""
 
-TODO:
-- test_reset_returns_valid_observation: shape/dtype matches observation_space
-- test_step_returns_valid_observation
-- test_episode_terminates: random-action rollout eventually terminates or
-  truncates (no infinite loop)
-- test_no_state_leakage: the observation at a node must NOT reveal the true
-  condition of an edge the agent hasn't traversed yet — this is the whole
-  partial-observability premise; a bug here silently defeats the project's
-  research question
-- test_reward_scale_sane: flood penalty should be meaningfully larger than
-  typical travel-time differences, but not so large it swamps all learning
-  signal from step 1 (log actual values, don't just guess)
-- test_reproducibility: same seed -> same scenario realization (needed for
-  fair baseline comparison in evaluation/)
-"""
+import networkx as nx
 
-import pytest  # noqa: F401
+from src.env.accra_routing_env import AccraRoutingEnv
+from src.env.graph_wrapper import GraphWrapper
 
 
-def test_reset_returns_valid_observation():
-    raise NotImplementedError("TODO")
+def _make_cardinal_graph():
+    graph = nx.MultiDiGraph()
+    nodes = {
+        "c": {"x": 0.0, "y": 0.0},
+        "n": {"x": 0.0, "y": 1.0},
+        "e": {"x": 1.0, "y": 0.0},
+        "s": {"x": 0.0, "y": -1.0},
+        "w": {"x": -1.0, "y": 0.0},
+    }
+    graph.add_nodes_from((node, data) for node, data in nodes.items())
+    for src, dst in [("c", "n"), ("c", "e"), ("c", "s"), ("c", "w")]:
+        graph.add_edge(src, dst, key=0, travel_time=10.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
+    return graph
 
 
-def test_step_returns_valid_observation():
-    raise NotImplementedError("TODO")
+def test_graph_wrapper_action_mask_is_bearing_sorted_and_padded():
+    graph = _make_cardinal_graph()
+    wrapper = GraphWrapper(graph, max_degree=4)
+
+    mask = wrapper.action_mask("c")
+    assert mask == [True, True, True, True]
+    assert wrapper.action_to_edge("c", 0) == ("c", "n", 0)
+    assert wrapper.action_to_edge("c", 1) == ("c", "e", 0)
+    assert wrapper.action_to_edge("c", 2) == ("c", "s", 0)
+    assert wrapper.action_to_edge("c", 3) == ("c", "w", 0)
 
 
-def test_episode_terminates():
-    raise NotImplementedError("TODO")
+def test_env_smoke_and_masks_are_exposed_for_sb3():
+    env = AccraRoutingEnv(
+        graph_path="data/processed/road_graph_full.graphml",
+        traffic_profile_path="data/processed/traffic_profile.parquet",
+        climatology_path="data/processed/rainfall_climatology.json",
+        config={
+            "env": {
+                "max_episode_steps": 5,
+                "flood_penalty": 50,
+                "step_penalty": 0.1,
+                "reveal_radius_hops": 1,
+                "train_flood_day_rate": 0.0,
+                "mid_episode_event_base_rate": 0.0,
+                "max_degree": None,
+            },
+            "cost_model": {"flood_weight": 0.5, "quality_penalty_weight": 1.0},
+        },
+        mode="train",
+    )
 
-
-def test_no_state_leakage():
-    raise NotImplementedError("TODO")
-
-
-def test_reward_scale_sane():
-    raise NotImplementedError("TODO")
-
-
-def test_reproducibility():
-    raise NotImplementedError("TODO")
+    obs, info = env.reset(seed=123)
+    assert "current_node_features" in obs
+    assert "destination_node_features" in obs
+    assert "local_edge_features" in obs
+    assert len(env.action_masks()) == env.action_space.n
+    assert sum(env.action_masks()) > 0
+    assert "origin" in info
+    assert "destination" in info

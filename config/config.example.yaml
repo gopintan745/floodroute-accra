@@ -130,6 +130,7 @@ cost_model:
   quality_penalty_weight: 1.0
 
 env:
+  max_degree: null   # null = auto-compute from graph at env init; set explicitly only to override
   max_episode_steps: 200
   flood_penalty: 50          # minutes-equivalent penalty for hitting a flooded edge
   step_penalty: 0.1          # small per-step penalty to discourage wandering
