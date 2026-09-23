@@ -149,4 +149,5 @@ training:
 
 evaluation:
   num_scenarios: 100
+  num_flood_scenarios: 30
   seed: 42

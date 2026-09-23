@@ -209,6 +209,7 @@ class AccraRoutingEnv(gym.Env):
         }, {
             "origin": self._origin_node,
             "destination": self._destination_node,
+            "month": self.episode_context["month"],
             "hour": self.episode_context["hour"],
             "is_weekend": self.episode_context["is_weekend"],
             "is_flood_day": self.episode_context["is_flood_day"],
@@ -239,6 +240,7 @@ class AccraRoutingEnv(gym.Env):
         obs, info = self._build_observation()
         info["origin"] = self._origin_node
         info["destination"] = self._destination_node
+        info["month"] = self.episode_context["month"]
         return obs, info
 
     def step(self, action):
