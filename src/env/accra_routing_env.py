@@ -219,6 +219,8 @@ class AccraRoutingEnv(gym.Env):
         super().reset(seed=seed)
         rng = np.random.default_rng(seed)
         self.hazard_sim.rng = np.random.default_rng(seed)
+        options = options or {}
+        scenario = options.get("scenario", options)
         nodes = list(self.graph.nodes)
         if len(nodes) < 2:
             raise ValueError("At least two nodes are required for a routing episode")
@@ -229,11 +231,35 @@ class AccraRoutingEnv(gym.Env):
         valid_origins = [node for node in nodes if self._reachable_destinations[node]]
         if not valid_origins:
             raise ValueError("Graph has no directed origin-destination pair")
-        self._origin_node = valid_origins[int(rng.integers(len(valid_origins)))]
-        destinations = self._reachable_destinations[self._origin_node]
-        self._destination_node = destinations[int(rng.integers(len(destinations)))]
+        self._origin_node = scenario.get(
+            "origin", valid_origins[int(rng.integers(len(valid_origins)))]
+        )
+        destinations = self._reachable_destinations.get(self._origin_node, ())
+        if not destinations:
+            raise ValueError(f"Scenario origin {self._origin_node!r} has no reachable destination")
+        self._destination_node = scenario.get(
+            "destination", destinations[int(rng.integers(len(destinations)))]
+        )
+        if self._destination_node not in destinations:
+            raise ValueError(
+                f"Scenario destination {self._destination_node!r} is not reachable "
+                f"from origin {self._origin_node!r}"
+            )
 
         self.episode_context = self.hazard_sim.reset_episode()
+        for key in ("month", "hour", "is_weekend", "is_flood_day"):
+            if key in scenario:
+                self.episode_context[key] = scenario[key]
+        if "flooded_edges" in scenario:
+            self.hazard_sim.is_flood_day = bool(self.episode_context["is_flood_day"])
+            self.hazard_sim.flooded_edges = {
+                tuple(edge) for edge in scenario["flooded_edges"]
+            }
+        if "flood_events" in scenario:
+            self.hazard_sim.event_schedule = {
+                int(event["step"]): [tuple(edge) for edge in event["edges"]]
+                for event in scenario["flood_events"]
+            }
         self.hazard_sim.set_current_position(self._origin_node)
         self._current_node = self._origin_node
         self._step_count = 0
@@ -309,6 +335,9 @@ class AccraRoutingEnv(gym.Env):
         info["dead_end"] = False
         info["success"] = terminated
         info["reward"] = reward
+        info["realized_travel_time"] = float(realized_time)
+        info["is_flooded"] = bool(is_flooded)
+        info["edge"] = [u, v, k]
         return obs, float(reward), bool(terminated), bool(truncated), info
 
     def render(self):

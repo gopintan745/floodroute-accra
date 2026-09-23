@@ -37,14 +37,15 @@ def write_summary(comparison: dict, output_path: str | Path = DEFAULT_SUMMARY) -
   lines = [
     "# Routing Evaluation Summary",
     "",
-    "| Method | Episodes | Mean travel time | Median travel time | Variance | Failure rate |",
-    "| --- | ---: | ---: | ---: | ---: | ---: |",
+    "| Method | Episodes | Mean time | Median time | Variance | Completion | Route failure | Flooded edge | Blocked edge |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ]
   for method, summary in comparison.get("methods", {}).items():
     lines.append(
       f"| {method} | {summary['episodes']} | {summary['mean_travel_time']:.3f} "
       f"| {summary['median_travel_time']:.3f} | {summary['variance_travel_time']:.3f} "
-      f"| {summary['failure_rate']:.3f} |"
+      f"| {summary['completion_rate']:.3f} | {summary['route_failure_rate']:.3f} "
+      f"| {summary['flooded_edge_rate']:.3f} | {summary['blocked_edge_rate']:.3f} |"
     )
   output_path = Path(output_path)
   output_path.parent.mkdir(parents=True, exist_ok=True)

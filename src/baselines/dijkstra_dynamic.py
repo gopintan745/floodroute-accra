@@ -229,7 +229,18 @@ def dynamic_shortest_path(
 # --------------------------------------------------------------------------
 
 def _nearest_node(graph, point):
-    return ox.distance.nearest_nodes(graph, X=point[0], Y=point[1])
+    try:
+        return ox.distance.nearest_nodes(graph, X=point[0], Y=point[1])
+    except (KeyError, TypeError, ValueError):
+        # OSMnx assumes integer node IDs when converting its nearest-node
+        # result. Evaluation fixtures and some GraphML files use strings.
+        return min(
+            graph.nodes,
+            key=lambda node: (
+                (float(graph.nodes[node].get("x", 0.0)) - float(point[0])) ** 2
+                + (float(graph.nodes[node].get("y", 0.0)) - float(point[1])) ** 2
+            ),
+        )
 
 
 def _edges_within_hops(graph, node, radius: int) -> set[tuple]:

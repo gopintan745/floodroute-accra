@@ -4,7 +4,12 @@ import networkx as nx
 
 from src.evaluation.compare_results import compare_results, write_summary
 from src.evaluation.metrics import hit_blocked_edge, summarize, travel_time
-from src.evaluation.run_scenarios import generate_scenarios, save_scenarios
+from src.evaluation.run_scenarios import (
+    evaluate_scenarios,
+    generate_scenarios,
+    save_scenarios,
+)
+from src.env.accra_routing_env import AccraRoutingEnv
 
 
 def _graph():
@@ -52,6 +57,66 @@ def test_generate_scenarios_returns_reachable_natural_and_flood_sets(tmp_path):
     assert json.loads(output.read_text(encoding="utf-8")) == scenarios
 
 
+def test_saved_scenario_replays_same_hazard_realization(tmp_path):
+    climatology = tmp_path / "climatology.json"
+    climatology.write_text(
+        json.dumps({"monthly_heavy_rain_frequency": [1.0] * 12}),
+        encoding="utf-8",
+    )
+    scenario = generate_scenarios(
+        _graph(),
+        ("missing-traffic.parquet", str(climatology)),
+        _config(),
+        num_scenarios=1,
+        num_flood_scenarios=0,
+        seed=22,
+    )["natural"][0]
+
+    def reset_with(seed):
+        env = AccraRoutingEnv(
+            _graph(), "missing-traffic.parquet", str(climatology), _config(), mode="eval"
+        )
+        _, info = env.reset(seed=seed, options={"scenario": scenario})
+        return info, sorted(env.hazard_sim.flooded_edges, key=str)
+
+    first_info, first_edges = reset_with(1)
+    second_info, second_edges = reset_with(999)
+    assert first_info == second_info
+    assert first_edges == second_edges
+
+
+def test_evaluate_scenarios_returns_comparable_method_outcomes(tmp_path):
+    climatology = tmp_path / "climatology.json"
+    climatology.write_text(
+        json.dumps({"monthly_heavy_rain_frequency": [1.0] * 12}),
+        encoding="utf-8",
+    )
+    scenarios = generate_scenarios(
+        _graph(),
+        ("missing-traffic.parquet", str(climatology)),
+        _config(),
+        num_scenarios=1,
+        num_flood_scenarios=0,
+        seed=31,
+    )
+    results = evaluate_scenarios(
+        _graph(),
+        ("missing-traffic.parquet", str(climatology)),
+        _config(),
+        scenarios,
+        seed=5,
+    )
+
+    assert set(results["methods"]) == {
+        "masked_random",
+        "static_shortest_path",
+        "dynamic_replanning",
+    }
+    for outcomes in results["methods"].values():
+        assert len(outcomes) == 1
+        assert "realized_travel_time" in outcomes[0]
+
+
 def test_metrics_and_comparison_summarize_route_results(tmp_path):
     realization = {
         "edges": {
@@ -65,12 +130,16 @@ def test_metrics_and_comparison_summarize_route_results(tmp_path):
     assert hit_blocked_edge(route, realization)
 
     results = [
-        {"actual_travel_time": 4.0, "edges_hit_flooded": 0, "success": True},
-        {"actual_travel_time": 8.0, "edges_hit_flooded": 1, "success": False},
+        {"actual_travel_time": 4.0, "flooded_edges": 0, "success": True, "reward": 96.0},
+        {"actual_travel_time": 8.0, "flooded_edges": 1, "success": True, "reward": 92.0},
     ]
     summary = summarize(results)
     assert summary["mean_travel_time"] == 6.0
-    assert summary["failure_rate"] == 0.5
+    assert summary["completion_rate"] == 1.0
+    assert summary["route_failure_rate"] == 0.0
+    assert summary["flooded_edge_rate"] == 0.5
+    assert summary["blocked_edge_rate"] == 0.0
+    assert summary["mean_reward"] == 94.0
 
     comparison = compare_results({"rl_agent": results})
     assert comparison["methods"]["rl_agent"]["episodes"] == 2

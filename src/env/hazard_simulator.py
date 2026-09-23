@@ -32,6 +32,7 @@ class HazardSimulator:
             for u, v, key, data in graph.edges(keys=True, data=True)
         }
         self.flooded_edges: set[tuple] = set()
+        self.event_schedule: dict[int, list[tuple]] = {}
         self.step = 0
         self.is_flood_day = False
         self.current_position = None
@@ -99,6 +100,7 @@ class HazardSimulator:
             raise ValueError(f"flood-day rate must be in [0, 1], got {flood_rate}")
         self.is_flood_day = bool(self.rng.random() < flood_rate)
         self.flooded_edges = set()
+        self.event_schedule = {}
         self.step = 0
         self.current_position = None
         self._episode_reset = True
@@ -108,6 +110,14 @@ class HazardSimulator:
                 for edge_id, susceptibility in self.flood_susceptibility.items()
                 if self.rng.random() < susceptibility
             }
+            max_steps = int(self._env_value("max_episode_steps", 200))
+            for step in range(max_steps):
+                self.event_schedule[step] = [
+                    edge_id
+                    for edge_id, susceptibility in self.flood_susceptibility.items()
+                    if edge_id not in self.flooded_edges
+                    and self.rng.random() < float(self._env_value("mid_episode_event_base_rate", 0.03)) * susceptibility
+                ]
         return {
             "month": month,
             "hour": hour,
@@ -147,14 +157,9 @@ class HazardSimulator:
         self.step = step
         if not self.is_flood_day:
             return []
-        base_rate = float(self._env_value("mid_episode_event_base_rate", 0.03))
-        if not 0.0 <= base_rate <= 1.0:
-            raise ValueError(
-                f"mid-episode event rate must be in [0, 1], got {base_rate}"
-            )
         newly_flooded = []
-        for edge_id, susceptibility in self.flood_susceptibility.items():
-            if edge_id not in self.flooded_edges and self.rng.random() < base_rate * susceptibility:
+        for edge_id in self.event_schedule.get(step, []):
+            if edge_id not in self.flooded_edges:
                 self.flooded_edges.add(edge_id)
                 newly_flooded.append(edge_id)
         return newly_flooded
