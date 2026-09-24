@@ -2,15 +2,30 @@
 
 from __future__ import annotations
 
+import ast
 from statistics import mean, median, pvariance
+
+
+def _edge_key(edge):
+    """Normalize tuple, list, and serialized tuple edge identifiers."""
+    if isinstance(edge, str):
+        try:
+            edge = ast.literal_eval(edge)
+        except (SyntaxError, ValueError):
+            return edge
+    if isinstance(edge, (list, tuple)) and len(edge) >= 3:
+        return tuple(edge[:3])
+    return edge
 
 
 def _edge_records(hazard_realization):
     if hazard_realization is None:
         return {}
     if isinstance(hazard_realization, dict):
-        return hazard_realization.get("edges", hazard_realization)
-    return {tuple(edge[:3]) if isinstance(edge, (list, tuple)) else edge: {} for edge in hazard_realization}
+        records = hazard_realization.get("edges", hazard_realization)
+    else:
+        records = {edge: {} for edge in hazard_realization}
+    return {_edge_key(edge): record for edge, record in records.items()}
 
 
 def _result_value(result, *names, default=None):
@@ -37,8 +52,8 @@ def travel_time(route, hazard_realization) -> float:
     records = _edge_records(hazard_realization)
     total = 0.0
     for edge in route:
-        edge_id = tuple(edge[:3]) if isinstance(edge, (list, tuple)) else edge
-        record = records.get(edge_id, records.get(str(edge_id), {}))
+        edge_id = _edge_key(edge)
+        record = records.get(edge_id, {})
         if isinstance(record, (int, float)):
             total += float(record)
             continue
@@ -58,10 +73,10 @@ def hit_blocked_edge(route, hazard_realization) -> bool:
         route = route.get("edges_traversed", route.get("path", []))
     records = _edge_records(hazard_realization)
     return any(
-        bool(records.get(edge, records.get(str(edge), {})).get("is_flooded", False))
-        or bool(records.get(edge, records.get(str(edge), {})).get("blocked", False))
+        bool(records.get(_edge_key(edge), {}).get("is_flooded", False))
+        or bool(records.get(_edge_key(edge), {}).get("blocked", False))
         for edge in route
-        if isinstance(records.get(edge, records.get(str(edge), {})), dict)
+        if isinstance(records.get(_edge_key(edge), {}), dict)
     )
 
 
