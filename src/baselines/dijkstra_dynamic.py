@@ -72,12 +72,15 @@ def annotate_dynamic_costs(
         reveal_overrides = {}
 
     for u, v, key, data in graph.edges(keys=True, data=True):
-        base_tt = data.get("travel_time", 0.0)
+        try:
+            base_tt = float(data.get("travel_time", 0.0))
+        except (TypeError, ValueError):
+            base_tt = 0.0
         highway_class = data.get("highway_class", "unclassified")
 
         # Traffic multiplier from lookup, with fallback and warning
         lookup_key = (highway_class, hour, is_weekend)
-        traffic_mult = traffic_lookup.get(lookup_key, 1.0)
+        traffic_mult = float(traffic_lookup.get(lookup_key, 1.0))
         if lookup_key not in traffic_lookup:
             logger.warning(
                 f"Missing traffic profile for {lookup_key} (edge {u}-{v}-{key}); "
@@ -334,8 +337,8 @@ def dynamic_shortest_path_with_replanning(
         traffic_mult = _traffic_multiplier(
             traffic_lookup, best_edge, hour, is_weekend
         )
-        base_travel_time = best_edge.get("travel_time", 0.0)
-        road_quality_score = best_edge.get("road_quality_score", 1.0)
+        base_travel_time = float(best_edge.get("travel_time", 0.0))
+        road_quality_score = float(best_edge.get("road_quality_score", 1.0))
         flood_penalty_seconds = float(
             hazard_sim.config.get("env", {}).get("flood_penalty", 50)
         ) * 60.0

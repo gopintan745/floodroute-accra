@@ -8,7 +8,9 @@ from pathlib import Path
 
 import networkx as nx
 import numpy as np
+from sb3_contrib import MaskablePPO
 from sb3_contrib.common.maskable.utils import get_action_masks
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from src.agents.training_utils import (
   CLIMATOLOGY_PATH,
@@ -165,12 +167,51 @@ def _evaluate_dynamic(env, scenario) -> dict:
     "flooded_edges": None,
     "flood_day": bool(scenario["is_flood_day"]),
   }
+
+
+def _evaluate_rl_scenario(model, vec_env, base_env, scenario) -> dict:
+  """Evaluate a fixed scenario with training-time observation normalization."""
+  raw_observation, reset_info = base_env.reset(options={"scenario": scenario})
+  observation = vec_env.normalize_obs({
+    key: np.expand_dims(value, axis=0)
+    for key, value in raw_observation.items()
+  })
+  total_reward = 0.0
+  realized_time = 0.0
+  flooded_edges = 0
+  terminated = truncated = False
+  final_info = {}
+  while not (terminated or truncated):
+    action, _ = model.predict(
+      observation,
+      deterministic=True,
+      action_masks=get_action_masks(vec_env),
+    )
+    raw_observation, reward, terminated, truncated, final_info = base_env.step(int(action[0]))
+    observation = vec_env.normalize_obs({
+      key: np.expand_dims(value, axis=0)
+      for key, value in raw_observation.items()
+    })
+    total_reward += float(reward)
+    realized_time += float(final_info.get("realized_travel_time", 0.0))
+    flooded_edges += int(final_info.get("is_flooded", False))
+  return {
+    "scenario_seed": int(scenario["seed"]),
+    "reward": float(total_reward),
+    "realized_travel_time": float(realized_time),
+    "success": bool(final_info.get("success", False)),
+    "dead_end": bool(final_info.get("dead_end", False)),
+    "truncated": bool(final_info.get("truncated", False)),
+    "flooded_edges": int(flooded_edges),
+    "flood_day": bool(reset_info["is_flood_day"]),
+  }
 def evaluate_scenarios(
   graph,
   env_ctor_args,
   config,
   scenarios: dict,
   model=None,
+  vecnormalize_path: str | Path | None = None,
   seed: int = 42,
 ) -> dict:
   """Evaluate fixed scenarios with masked random, static, and optional RL policies."""
@@ -182,6 +223,13 @@ def evaluate_scenarios(
   }
   if model is not None:
     methods["rl_agent"] = []
+    if vecnormalize_path is None:
+      raise ValueError("vecnormalize_path is required when evaluating an RL model")
+    rl_vec_env = DummyVecEnv([lambda: _make_env(graph, env_ctor_args, config)])
+    rl_vec_env = VecNormalize.load(vecnormalize_path, rl_vec_env)
+    rl_vec_env.training = False
+    rl_vec_env.norm_reward = False
+    rl_base_env = rl_vec_env.venv.envs[0]
   for index, scenario in enumerate(records):
     rng = np.random.default_rng(seed + index)
     env = _make_env(graph, env_ctor_args, config)
@@ -203,17 +251,11 @@ def evaluate_scenarios(
     env.close()
 
     if model is not None:
-      env = _make_env(graph, env_ctor_args, config)
       methods["rl_agent"].append(
-        _run_env_policy(
-          env,
-          scenario,
-          lambda current_env, obs: model.predict(
-            obs, deterministic=True, action_masks=get_action_masks(current_env)
-          )[0],
-        )
+        _evaluate_rl_scenario(model, rl_vec_env, rl_base_env, scenario)
       )
-      env.close()
+  if model is not None:
+    rl_vec_env.close()
   return {"scenarios": scenarios, "methods": methods}
 
 
@@ -224,7 +266,11 @@ def save_results(results: dict, output_path: str | Path = RESULTS_PATH) -> Path:
   return output_path
 
 
-def main(config_path: str | Path | None = None) -> Path:
+def main(
+  config_path: str | Path | None = None,
+  model_path: str | Path | None = None,
+  vecnormalize_path: str | Path | None = None,
+) -> Path:
   config = load_config(config_path)
   evaluation = config.get("evaluation", {})
   graph = load_graph(GRAPH_PATH)
@@ -238,7 +284,15 @@ def main(config_path: str | Path | None = None) -> Path:
     seed=int(evaluation.get("seed", 42)),
   )
   save_scenarios(scenarios)
-  results = evaluate_scenarios(graph, env_ctor_args, config, scenarios)
+  model = MaskablePPO.load(model_path) if model_path else None
+  results = evaluate_scenarios(
+    graph,
+    env_ctor_args,
+    config,
+    scenarios,
+    model=model,
+    vecnormalize_path=vecnormalize_path,
+  )
   results_path = save_results(results)
   comparison = compare_results(results)
   write_comparison(comparison)
@@ -249,5 +303,7 @@ def main(config_path: str | Path | None = None) -> Path:
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--config", default=None)
+  parser.add_argument("--model", default=None)
+  parser.add_argument("--vecnormalize", default=None)
   args = parser.parse_args()
-  print(main(args.config))
+  print(main(args.config, args.model, args.vecnormalize))

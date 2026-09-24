@@ -316,7 +316,10 @@ class AccraRoutingEnv(gym.Env):
             quality_penalty_weight=self.cost_cfg.quality_penalty_weight,
         )
         if is_flooded:
-            realized_time += float(self.config.get("env", {}).get("flood_penalty", 50.0))
+            flood_penalty_minutes = float(
+                self.config.get("env", {}).get("flood_penalty", 50.0)
+            )
+            realized_time += flood_penalty_minutes * 60.0
 
         reward = -realized_time - float(self.config.get("env", {}).get("step_penalty", 0.1))
 
