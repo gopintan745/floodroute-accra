@@ -70,6 +70,15 @@ def _make_env_factory(graph, config):
     return factory
 
 
+def _action_to(env, target):
+    return next(
+        index
+        for index in range(env.action_space.n)
+        if (edge := env.graph_wrapper.action_to_edge(env._current_node, index))
+        and edge[1] == target
+    )
+
+
 def _evaluate_model_outcomes(model, env_factory, num_episodes, seed):
     outcomes = []
     for episode in range(num_episodes):
@@ -160,3 +169,77 @@ def test_rl_agent_beats_masked_random_and_static_on_rainy_days():
     assert rl_summary["completion_rate"] == 1.0
     assert rl_summary["mean_reward"] > random_summary["mean_reward"]
     assert rl_summary["mean_reward"] > static_summary["mean_reward"]
+
+
+def test_flooded_detour_loop_terminates_on_revisit():
+    """A flooded detour cannot loop until the episode cap is exhausted."""
+    graph = nx.MultiDiGraph()
+    for node, (x, y) in {
+        "start": (0.0, 0.0),
+        "junction": (1.0, 0.0),
+        "detour": (1.0, 1.0),
+        "goal": (2.0, 0.0),
+    }.items():
+        graph.add_node(node, x=x, y=y)
+
+    edge_defaults = {
+        "length": 1.0,
+        "road_quality_score": 1.0,
+        "highway_class": "primary",
+        "flood_risk": 0.0,
+        "flood_susceptibility": 0.0,
+    }
+    graph.add_edge("start", "junction", key=0, travel_time=1.0, **edge_defaults)
+    graph.add_edge(
+        "junction", "detour", key=0, travel_time=1.0,
+        **{**edge_defaults, "flood_risk": 1.0, "flood_susceptibility": 1.0},
+    )
+    graph.add_edge("detour", "junction", key=0, travel_time=1.0, **edge_defaults)
+    graph.add_edge("junction", "goal", key=0, travel_time=1.0, **edge_defaults)
+
+    config = {
+        "env": {
+            "max_degree": None,
+            "max_episode_steps": 64,
+            "flood_penalty": 50.0,
+            "step_penalty": 0.1,
+            "reveal_radius_hops": 1,
+            "train_flood_day_rate": 1.0,
+            "mid_episode_event_base_rate": 0.0,
+            "revisit_mode": "terminate",
+            "revisit_penalty": 50.0,
+            "revisit_penalty_growth": 2.0,
+        },
+        "cost_model": {"flood_weight": 0.5, "quality_penalty_weight": 1.0},
+    }
+    env = _FixedRainyRouteEnv(
+        graph,
+        traffic_profile_path="does-not-exist.parquet",
+        climatology_path="does-not-exist.json",
+        config=config,
+        mode="train",
+    )
+    env.reset(
+        seed=0,
+        options={
+            "origin": "start",
+            "destination": "goal",
+            "is_flood_day": True,
+            "flooded_edges": [["junction", "detour", 0]],
+        },
+    )
+
+    env.step(_action_to(env, "junction"))
+    _, _, terminated_on_detour, _, detour_info = env.step(_action_to(env, "detour"))
+    _, reward, terminated_on_return, truncated, return_info = env.step(
+        _action_to(env, "junction")
+    )
+
+    assert terminated_on_detour is False
+    assert detour_info["is_flooded"] is True
+    assert terminated_on_return is True
+    assert truncated is False
+    assert return_info["revisit_failure"] is True
+    assert return_info["success"] is False
+    assert return_info["total_revisits"] == 1
+    assert reward < 0
