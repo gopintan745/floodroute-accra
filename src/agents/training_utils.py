@@ -85,7 +85,17 @@ def make_normalized_vec_env(
     mode: str = "train",
 ) -> VecNormalize:
     vec_env = make_vec_env(make_env_factory(graph, config, mode), n_envs=n_envs)
-    return VecNormalize(vec_env, norm_obs=True, norm_reward=True)
+    clip_reward = float(
+        config.get("training", {}).get("ppo", {}).get("clip_reward", 10.0)
+    )
+    if clip_reward <= 0:
+        raise ValueError("training.ppo.clip_reward must be positive")
+    return VecNormalize(
+        vec_env,
+        norm_obs=True,
+        norm_reward=True,
+        clip_reward=clip_reward,
+    )
 
 
 def save_training_artifacts(model, vec_env: VecNormalize, output_dir: str | Path) -> tuple[Path, Path]:

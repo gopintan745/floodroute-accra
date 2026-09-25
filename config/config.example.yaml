@@ -149,6 +149,7 @@ training:
   ppo:
     total_timesteps: 1000000
     n_envs: 4
+    clip_reward: 10.0  # bound normalized per-step reward outliers during training
 
 evaluation:
   num_scenarios: 100
