@@ -39,6 +39,7 @@ Log the decision in docs/design_decisions.md.
 """
 
 import gymnasium as gym
+import math
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -109,6 +110,7 @@ class AccraRoutingEnv(gym.Env):
         )
 
         node_dim = 2
+        goal_relative_dim = 3  # distance_m, sin(bearing), cos(bearing)
         edge_dim = 4
         self.observation_space = spaces.Dict(
             {
@@ -122,6 +124,12 @@ class AccraRoutingEnv(gym.Env):
                     low=-np.inf,
                     high=np.inf,
                     shape=(node_dim,),
+                    dtype=np.float32,
+                ),
+                "goal_relative_features": spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(goal_relative_dim,),
                     dtype=np.float32,
                 ),
                 "local_edge_features": spaces.Box(
@@ -196,6 +204,38 @@ class AccraRoutingEnv(gym.Env):
         lat = float(node_data.get("y", 0.0))
         return np.array([lon, lat], dtype=np.float32)
 
+    def _goal_relative_features(self) -> np.ndarray:
+        """Return distance and continuous bearing from current node to goal."""
+        current = self.graph.nodes[self._current_node]
+        destination = self.graph.nodes[self._destination_node]
+        current_lon = math.radians(float(current.get("x", 0.0)))
+        current_lat = math.radians(float(current.get("y", 0.0)))
+        destination_lon = math.radians(float(destination.get("x", 0.0)))
+        destination_lat = math.radians(float(destination.get("y", 0.0)))
+
+        delta_lat = destination_lat - current_lat
+        delta_lon = destination_lon - current_lon
+        haversine_a = (
+            math.sin(delta_lat / 2.0) ** 2
+            + math.cos(current_lat)
+            * math.cos(destination_lat)
+            * math.sin(delta_lon / 2.0) ** 2
+        )
+        distance_m = 6_371_000.0 * 2.0 * math.asin(
+            min(1.0, math.sqrt(haversine_a))
+        )
+        bearing = math.atan2(
+            math.sin(delta_lon) * math.cos(destination_lat),
+            math.cos(current_lat) * math.sin(destination_lat)
+            - math.sin(current_lat)
+            * math.cos(destination_lat)
+            * math.cos(delta_lon),
+        )
+        return np.array(
+            [distance_m, math.sin(bearing), math.cos(bearing)],
+            dtype=np.float32,
+        )
+
     def _edge_feature_vector(self, edge, hour: int, is_weekend: bool) -> np.ndarray:
         if edge is None:
             return np.zeros(4, dtype=np.float32)
@@ -235,6 +275,7 @@ class AccraRoutingEnv(gym.Env):
         return {
             "current_node_features": current_features,
             "destination_node_features": destination_features,
+            "goal_relative_features": self._goal_relative_features(),
             "local_edge_features": local_edge_features,
         }, {
             "origin": self._origin_node,

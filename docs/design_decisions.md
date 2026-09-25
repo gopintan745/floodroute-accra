@@ -534,6 +534,29 @@ could replace it.
 
 ---
 
+## 2026-09-25 - Goal-relative routing observations
+
+**Decision:** Add a `goal_relative_features` observation containing great-circle
+distance in meters and bearing encoded as sine/cosine values from the current
+node to the destination.
+
+**Alternatives considered:** Provide only absolute node coordinates, add a raw
+bearing angle, or add only a scalar distance-to-goal feature.
+
+**Why this one:** Distance gives the policy direct proximity information, while
+the sine/cosine bearing encoding avoids the discontinuity at north and south
+that a raw angle introduces. Adding the feature as a separate observation key
+keeps the existing node and local-edge feature contracts explicit.
+
+**Consequence:** The observation space changed, so existing PPO artifacts are
+not compatible with this environment; PPO must be retrained before comparing
+new results with the previous run.
+
+**What would change my mind:** Evidence that graph shortest-path distance is a
+more useful target signal than geographic distance for this road network.
+
+---
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):

@@ -80,6 +80,7 @@ def _make_env_with_graph(
         {
             "current_node_features": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
             "destination_node_features": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
+            "goal_relative_features": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
             "local_edge_features": spaces.Box(low=-np.inf, high=np.inf, shape=(env.graph_wrapper.max_degree, 4), dtype=np.float32),
         }
     )
@@ -154,7 +155,9 @@ def test_env_smoke_and_masks_are_exposed_for_sb3():
     obs, info = env.reset(seed=123)
     assert "current_node_features" in obs
     assert "destination_node_features" in obs
+    assert "goal_relative_features" in obs
     assert "local_edge_features" in obs
+    assert obs["goal_relative_features"].shape == (3,)
     assert len(env.action_masks()) == env.action_space.n
     assert sum(env.action_masks()) > 0
     assert "origin" in info
@@ -163,6 +166,32 @@ def test_env_smoke_and_masks_are_exposed_for_sb3():
     model = MaskablePPO("MultiInputPolicy", env, n_steps=8, verbose=0)
     action, _ = model.predict(obs, action_masks=env.action_masks())
     assert 0 <= int(action) < env.action_space.n
+
+
+def test_goal_relative_features_encode_distance_and_bearing():
+    graph = nx.MultiDiGraph()
+    graph.add_node("start", x=0.0, y=0.0)
+    graph.add_node("goal", x=0.0, y=1.0)
+    graph.add_edge(
+        "start",
+        "goal",
+        key=0,
+        travel_time=1.0,
+        highway_class="residential",
+        flood_risk=0.0,
+        road_quality_score=1.0,
+    )
+    env = _make_env_with_graph(graph)
+
+    observation, _ = env.reset(
+        seed=0,
+        options={"origin": "start", "destination": "goal"},
+    )
+    distance_m, bearing_sin, bearing_cos = observation["goal_relative_features"]
+
+    assert 110_000 < distance_m < 112_000
+    assert abs(bearing_sin) < 1e-5
+    assert abs(bearing_cos - 1.0) < 1e-5
 
 
 def test_partial_observability_boundary():
