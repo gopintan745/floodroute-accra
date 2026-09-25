@@ -131,7 +131,7 @@ cost_model:
 
 env:
   max_degree: null   # null = auto-compute from graph at env init; set explicitly only to override
-  max_episode_steps: 200
+  max_episode_steps: 64  # static routes: max 59 hops in a 2,000-pair sample
   flood_penalty: 50          # minutes-equivalent penalty for hitting a flooded edge
   step_penalty: 0.1          # small per-step penalty to discourage wandering
   reveal_radius_hops: 1      # undirected graph hops with realized flood visibility

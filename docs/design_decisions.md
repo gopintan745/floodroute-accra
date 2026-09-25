@@ -557,6 +557,24 @@ more useful target signal than geographic distance for this road network.
 
 ---
 
+## 2026-09-25 - Episode hop cap based on route distribution
+
+**Decision:** Set `env.max_episode_steps` to 64. Static shortest-path routes
+had a median of 27 hops, a p95 of 48, a p99 of 55, and a maximum of 59 in a
+2,000-pair reachable sample from the processed graph.
+
+**Why this one:** A cap of 200 was much larger than observed route demand and
+could let a looping policy accumulate repeated flood penalties before
+truncation. Sixty-four leaves a small margin above the observed static-route
+maximum while keeping truncation a genuine safety net. Revisit termination
+remains the first-line loop failure mode.
+
+**What would change my mind:** A later graph rebuild or evaluation distribution
+with legitimate routes above this ceiling; re-measure the hop distribution
+before raising the cap.
+
+---
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):
