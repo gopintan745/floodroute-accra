@@ -33,7 +33,14 @@ def _make_cardinal_graph():
     return graph
 
 
-def _make_env_with_graph(graph, *, max_episode_steps=5, step_penalty=0.1, flood_penalty=50.0):
+def _make_env_with_graph(
+    graph,
+    *,
+    max_episode_steps=5,
+    step_penalty=0.1,
+    flood_penalty=50.0,
+    revisit_mode="terminate",
+):
     env = AccraRoutingEnv(
         graph_path="data/processed/road_graph_full.graphml",
         traffic_profile_path="data/processed/traffic_profile.parquet",
@@ -47,6 +54,9 @@ def _make_env_with_graph(graph, *, max_episode_steps=5, step_penalty=0.1, flood_
                 "train_flood_day_rate": 0.0,
                 "mid_episode_event_base_rate": 0.0,
                 "max_degree": None,
+                "revisit_mode": revisit_mode,
+                "revisit_penalty": 50.0,
+                "revisit_penalty_growth": 2.0,
             },
             "cost_model": {"flood_weight": 0.5, "quality_penalty_weight": 1.0},
         },
@@ -78,6 +88,15 @@ def _make_env_with_graph(graph, *, max_episode_steps=5, step_penalty=0.1, flood_
     env.hazard_sim.is_flood_day = False
     env.hazard_sim.flooded_edges = set()
     return env
+
+
+def _action_to(env, target):
+    return next(
+        index
+        for index in range(env.action_space.n)
+        if (edge := env.graph_wrapper.action_to_edge(env._current_node, index))
+        and edge[1] == target
+    )
 
 
 def test_graph_wrapper_action_mask_is_bearing_sorted_and_padded():
@@ -214,6 +233,9 @@ def test_reward_reduces_correctly_on_boring_episode():
     env.hazard_sim.is_flood_day = False
     env.hazard_sim.flooded_edges = set()
     env.hazard_sim.set_current_position("start")
+    env.visited_nodes = {"start"}
+    env.visit_counts = {"start": 1}
+    env.total_revisits = 0
     env.episode_context["is_flood_day"] = False
 
     _, reward, terminated, truncated, _ = env.step(0)
@@ -236,6 +258,9 @@ def test_termination_vs_truncation():
     env.hazard_sim.set_current_position("start")
     env.hazard_sim.is_flood_day = False
     env.hazard_sim.flooded_edges = set()
+    env.visited_nodes = {"start"}
+    env.visit_counts = {"start": 1}
+    env.total_revisits = 0
 
     _, reward, terminated, truncated, info = env.step(0)
     assert terminated is False
@@ -250,6 +275,9 @@ def test_termination_vs_truncation():
     env2.hazard_sim.set_current_position("start")
     env2.hazard_sim.is_flood_day = False
     env2.hazard_sim.flooded_edges = set()
+    env2.visited_nodes = {"start"}
+    env2.visit_counts = {"start": 1}
+    env2.total_revisits = 0
 
     _, reward2, terminated2, truncated2, info2 = env2.step(0)
     assert terminated2 is False
@@ -262,3 +290,48 @@ def test_termination_vs_truncation():
     assert terminated3 is True
     assert truncated3 is False
     assert info3["terminated"] is True
+
+
+def test_revisit_terminates_as_distinct_failure():
+    graph = nx.MultiDiGraph()
+    for node, coords in {"start": (0.0, 0.0), "mid": (0.0, 1.0), "goal": (0.0, 2.0)}.items():
+        graph.add_node(node, x=coords[0], y=coords[1])
+    graph.add_edge("start", "mid", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
+    graph.add_edge("mid", "start", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
+    graph.add_edge("mid", "goal", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
+
+    env = _make_env_with_graph(graph, revisit_mode="terminate")
+    env.reset(seed=0, options={"origin": "start", "destination": "goal"})
+    env.step(_action_to(env, "mid"))
+    _, reward, terminated, truncated, info = env.step(_action_to(env, "start"))
+
+    assert terminated is True
+    assert truncated is False
+    assert info["revisit"] is True
+    assert info["revisit_failure"] is True
+    assert info["success"] is False
+    assert info["visit_count"] == 2
+    assert reward < 0
+    assert env.visited_nodes == {"start", "mid"}
+
+
+def test_revisit_penalty_escalates_without_termination():
+    graph = nx.MultiDiGraph()
+    for node, coords in {"start": (0.0, 0.0), "mid": (0.0, 1.0), "goal": (0.0, 2.0)}.items():
+        graph.add_node(node, x=coords[0], y=coords[1])
+    graph.add_edge("start", "mid", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
+    graph.add_edge("mid", "start", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
+    graph.add_edge("start", "goal", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
+
+    env = _make_env_with_graph(graph, revisit_mode="penalty")
+    env.reset(seed=0, options={"origin": "start", "destination": "goal"})
+    env.step(_action_to(env, "mid"))
+    _, _, terminated, _, first_info = env.step(_action_to(env, "start"))
+    _, _, second_terminated, _, second_info = env.step(_action_to(env, "mid"))
+
+    assert terminated is False
+    assert second_terminated is False
+    assert first_info["revisit"] is True
+    assert second_info["revisit"] is True
+    assert second_info["revisit_penalty"] > first_info["revisit_penalty"]
+    assert env.visit_counts["start"] == 2

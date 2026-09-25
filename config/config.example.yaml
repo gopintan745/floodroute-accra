@@ -137,6 +137,9 @@ env:
   reveal_radius_hops: 1      # undirected graph hops with realized flood visibility
   train_flood_day_rate: 0.35        # deliberate oversampling during training
   mid_episode_event_base_rate: 0.03 # per-step rate scaled by flood susceptibility
+  revisit_mode: terminate     # terminate or penalty
+  revisit_penalty: 50         # base penalty for the first revisit
+  revisit_penalty_growth: 2.0 # multiplier applied on each subsequent revisit
 
 training:
   sanity_check:

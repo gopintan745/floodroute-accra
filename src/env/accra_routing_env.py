@@ -78,6 +78,23 @@ class AccraRoutingEnv(gym.Env):
         self._destination_node = None
         self._origin_node = None
         self._step_count = 0
+        self.visited_nodes: set = set()
+        self.visit_counts: dict = {}
+        self.total_revisits = 0
+        self.revisit_mode = env_cfg.get("revisit_mode", "terminate")
+        if self.revisit_mode not in {"terminate", "penalty"}:
+            raise ValueError(
+                "env.revisit_mode must be 'terminate' or 'penalty', "
+                f"got {self.revisit_mode!r}"
+            )
+        self.revisit_penalty = float(env_cfg.get("revisit_penalty", 50.0))
+        self.revisit_penalty_growth = float(
+            env_cfg.get("revisit_penalty_growth", 2.0)
+        )
+        if self.revisit_penalty < 0:
+            raise ValueError("env.revisit_penalty must be non-negative")
+        if self.revisit_penalty_growth < 1.0:
+            raise ValueError("env.revisit_penalty_growth must be at least 1.0")
 
         self.traffic_profile = self._load_traffic_profile(traffic_profile_path)
         self.traffic_lookup = self._build_traffic_lookup(self.traffic_profile)
@@ -159,6 +176,19 @@ class AccraRoutingEnv(gym.Env):
         # MaskablePPO cannot sample from an all-false mask. A sink is handled
         # as a terminal failure in step(), so expose a dummy choice only there.
         return mask if any(mask) else [True] * self.max_degree
+
+    def _record_visit(self, node) -> int:
+        """Record a node visit and return its one-based visit count."""
+        visit_count = self.visit_counts.get(node, 0) + 1
+        self.visit_counts[node] = visit_count
+        self.visited_nodes.add(node)
+        return visit_count
+
+    def _revisit_penalty_for(self, revisit_number: int) -> float:
+        """Return the escalating penalty for the episode-wide revisit number."""
+        return self.revisit_penalty * (
+            self.revisit_penalty_growth ** (revisit_number - 1)
+        )
 
     def _node_features(self, node) -> np.ndarray:
         node_data = self.graph.nodes[node]
@@ -263,6 +293,10 @@ class AccraRoutingEnv(gym.Env):
         self.hazard_sim.set_current_position(self._origin_node)
         self._current_node = self._origin_node
         self._step_count = 0
+        self.visited_nodes = set()
+        self.visit_counts = {}
+        self.total_revisits = 0
+        self._record_visit(self._origin_node)
         obs, info = self._build_observation()
         info["origin"] = self._origin_node
         info["destination"] = self._destination_node
@@ -328,15 +362,33 @@ class AccraRoutingEnv(gym.Env):
         self._step_count += 1
 
         terminated = self._current_node == self._destination_node
+        prior_visits = self.visit_counts.get(self._current_node, 0)
+        is_revisit = prior_visits > 0
+        revisit_penalty = 0.0
+        revisit_failure = False
+        visit_count = self._record_visit(self._current_node)
+        if is_revisit:
+            self.total_revisits += 1
+            revisit_penalty = self._revisit_penalty_for(self.total_revisits)
+            reward -= revisit_penalty
+            if self.revisit_mode == "terminate":
+                terminated = True
+                revisit_failure = True
         if terminated:
-            reward += 100.0
+            if not revisit_failure:
+                reward += 100.0
         truncated = (not terminated) and (self._step_count >= int(self.config.get("env", {}).get("max_episode_steps", 200)))
 
         obs, info = self._build_observation()
         info["terminated"] = terminated
         info["truncated"] = truncated
         info["dead_end"] = False
-        info["success"] = terminated
+        info["success"] = terminated and not revisit_failure
+        info["revisit"] = is_revisit
+        info["revisit_failure"] = revisit_failure
+        info["revisit_penalty"] = float(revisit_penalty)
+        info["visit_count"] = visit_count
+        info["total_revisits"] = self.total_revisits
         info["reward"] = reward
         info["realized_travel_time"] = float(realized_time)
         info["is_flooded"] = bool(is_flooded)
