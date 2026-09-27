@@ -80,7 +80,7 @@ class AccraRoutingEnv(gym.Env):
         self._origin_node = None
         self._step_count = 0
         self.visited_nodes: set = set()
-        self.visit_counts: dict = {}
+        self.visit_counts: dict = {}  # node -> (visit_count, known_flooded_at_visit)
         self.total_revisits = 0
         self.revisit_mode = env_cfg.get("revisit_mode", "terminate")
         if self.revisit_mode not in {"terminate", "penalty"}:
@@ -185,12 +185,21 @@ class AccraRoutingEnv(gym.Env):
         # as a terminal failure in step(), so expose a dummy choice only there.
         return mask if any(mask) else [True] * self.max_degree
 
-    def _record_visit(self, node) -> int:
-        """Record a node visit and return its one-based visit count."""
-        visit_count = self.visit_counts.get(node, 0) + 1
-        self.visit_counts[node] = visit_count
+    def _local_known_flood_count(self, node) -> int:
+        """Count currently-known-flooded edges within reveal_radius_hops of the given node."""
+        if self.hazard_sim.current_position is None:
+            return 0
+        nearby_edges = self.graph_wrapper.neighbors_within_hops(node, self.hazard_sim.reveal_radius_hops)
+        return sum(1 for edge in nearby_edges if edge in self.hazard_sim.flooded_edges)
+
+    def _record_visit(self, node) -> tuple[int, int]:
+        """Record a node visit and return (visit_count, known_flooded_at_visit)."""
+        prior_count, prior_known = self.visit_counts.get(node, (0, 0))
+        visit_count = prior_count + 1
+        known_flooded = self._local_known_flood_count(node)
+        self.visit_counts[node] = (visit_count, known_flooded)
         self.visited_nodes.add(node)
-        return visit_count
+        return visit_count, known_flooded
 
     def _revisit_penalty_for(self, revisit_number: int) -> float:
         """Return the escalating penalty for the episode-wide revisit number."""
@@ -403,18 +412,27 @@ class AccraRoutingEnv(gym.Env):
         self._step_count += 1
 
         terminated = self._current_node == self._destination_node
-        prior_visits = self.visit_counts.get(self._current_node, 0)
-        is_revisit = prior_visits > 0
+        prior_count, prior_known = self.visit_counts.get(self._current_node, (0, 0))
+        is_revisit = prior_count > 0
         revisit_penalty = 0.0
         revisit_failure = False
-        visit_count = self._record_visit(self._current_node)
+        visit_count, known_flooded = self._record_visit(self._current_node)
+        
         if is_revisit:
-            self.total_revisits += 1
-            revisit_penalty = self._revisit_penalty_for(self.total_revisits)
-            reward -= revisit_penalty
-            if self.revisit_mode == "terminate":
-                terminated = True
-                revisit_failure = True
+            current_known = self._local_known_flood_count(self._current_node)
+            informed_revisit = current_known > prior_known
+            if informed_revisit:
+                # Rational backtrack: new flood information discovered since last visit
+                # No penalty, no termination — treat as fresh step
+                pass
+            else:
+                # Blind loop: no new local information
+                self.total_revisits += 1
+                revisit_penalty = self._revisit_penalty_for(self.total_revisits)
+                reward -= revisit_penalty
+                if self.revisit_mode == "terminate":
+                    terminated = True
+                    revisit_failure = True
         if terminated:
             if not revisit_failure:
                 reward += 100.0
