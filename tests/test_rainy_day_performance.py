@@ -16,26 +16,61 @@ from src.env.accra_routing_env import AccraRoutingEnv
 
 
 def _make_rainy_route_graph():
+    """
+    Improved graph with proper partial observability:
+    
+    start → approach → junction (decision point)
+                    ├──→ shortcut (flooded on rainy days) ──→ goal
+                    └──→ safe_a → safe_b → goal (always safe)
+    
+    Key design:
+    - From 'start', agent only sees 'approach' (1 hop)
+    - From 'approach', agent sees 'junction' (1 hop) 
+    - From 'junction', agent sees BOTH 'shortcut' and 'safe_a' (1 hop)
+    - Flood on 'junction→shortcut' is only revealed AT the junction
+    - This forces the agent to learn: "at junction, check flood status before choosing"
+    - The shortcut is SHORTER (travel_time=1.0) so it looks attractive when not flooded
+    - The safe path is LONGER (travel_time=2.0 per edge) but reliable
+    """
     graph = nx.MultiDiGraph()
+    # Coordinates for visualization
     graph.add_node("start", x=0.0, y=0.0)
-    graph.add_node("shortcut", x=1.0, y=0.0)
-    graph.add_node("safe_a", x=0.0, y=1.0)
-    graph.add_node("safe_b", x=0.0, y=2.0)
-    graph.add_node("goal", x=1.0, y=2.0)
+    graph.add_node("approach", x=1.0, y=0.0)
+    graph.add_node("junction", x=2.0, y=0.0)
+    graph.add_node("shortcut", x=3.0, y=0.0)
+    graph.add_node("safe_a", x=2.0, y=1.0)
+    graph.add_node("safe_b", x=2.0, y=2.0)
+    graph.add_node("goal", x=3.0, y=2.0)
 
+    # Approach path (always safe, leads to decision point)
     graph.add_edge(
-        "start", "shortcut", key=0, travel_time=1.0,
+        "start", "approach", key=0, travel_time=1.0,
+        flood_susceptibility=0.0, flood_risk=0.0,
+        road_quality_score=1.0, highway_class="primary",
+    )
+    graph.add_edge(
+        "approach", "junction", key=0, travel_time=1.0,
+        flood_susceptibility=0.0, flood_risk=0.0,
+        road_quality_score=1.0, highway_class="primary",
+    )
+
+    # Shortcut: SHORTER but flood-prone (flood_susceptibility=1.0)
+    # On rainy days, this WILL be flooded (flood_risk=1.0, susceptibility=1.0)
+    graph.add_edge(
+        "junction", "shortcut", key=0, travel_time=1.0,  # FAST when clear
         flood_susceptibility=1.0, flood_risk=1.0,
         road_quality_score=1.0, highway_class="primary",
     )
     graph.add_edge(
-        "shortcut", "goal", key=0, travel_time=1.0,
+        "shortcut", "goal", key=0, travel_time=1.0,  # FAST when clear
         flood_susceptibility=1.0, flood_risk=1.0,
         road_quality_score=1.0, highway_class="primary",
     )
-    for source, target in [("start", "safe_a"), ("safe_a", "safe_b"), ("safe_b", "goal")]:
+
+    # Safe detour: LONGER but never floods
+    for source, target in [("junction", "safe_a"), ("safe_a", "safe_b"), ("safe_b", "goal")]:
         graph.add_edge(
-            source, target, key=0, travel_time=2.0,
+            source, target, key=0, travel_time=2.0,  # SLOWER but reliable
             flood_susceptibility=0.0, flood_risk=0.0,
             road_quality_score=1.0, highway_class="primary",
         )
@@ -46,14 +81,26 @@ class _FixedRainyRouteEnv(AccraRoutingEnv):
     """Keep every episode on the same rainy origin-destination trip."""
 
     def reset(self, *, seed=None, options=None):
+        options = options or {}
+        # Only set defaults if not explicitly provided
+        if "origin" not in options:
+            options["origin"] = "start"
+        if "destination" not in options:
+            options["destination"] = "goal"
+        if "is_flood_day" not in options:
+            options["is_flood_day"] = True
+        # Default flooded edges for the new graph (only used if not provided)
+        if "flooded_edges" not in options:
+            options["flooded_edges"] = [["junction", "shortcut", 0], ["shortcut", "goal", 0]]
+        
         observation, info = super().reset(seed=seed, options=options)
-        self._origin_node = "start"
-        self._destination_node = "goal"
-        self._current_node = "start"
-        self.hazard_sim.set_current_position("start")
+        self._origin_node = options["origin"]
+        self._destination_node = options["destination"]
+        self._current_node = options["origin"]
+        self.hazard_sim.set_current_position(options["origin"])
         observation, info = self._build_observation()
-        info["origin"] = "start"
-        info["destination"] = "goal"
+        info["origin"] = options["origin"]
+        info["destination"] = options["destination"]
         return observation, info
 
 
@@ -111,7 +158,7 @@ def test_rl_agent_beats_masked_random_and_static_on_rainy_days():
     config = {
         "env": {
             "max_degree": None,
-            "max_episode_steps": 15,
+            "max_episode_steps": 20,
             "flood_penalty": 50.0,
             "step_penalty": 0.1,
             "reveal_radius_hops": 1,
@@ -125,14 +172,18 @@ def test_rl_agent_beats_masked_random_and_static_on_rainy_days():
     model = MaskablePPO(
         "MultiInputPolicy",
         training_env,
-        n_steps=16,
-        batch_size=8,
-        learning_rate=0.01,
-        gamma=0.9,
+        n_steps=128,
+        batch_size=32,
+        learning_rate=0.0003,
+        gamma=0.99,
+        ent_coef=0.01,
         seed=7,
         verbose=0,
     )
-    model.learn(total_timesteps=1_000)
+    # Sufficient timesteps for the agent to learn the flood-avoidance policy
+    # with partial observability (flood only revealed at junction)
+    # Higher n_steps, more entropy, lower learning rate for stability
+    model.learn(total_timesteps=100_000)
 
     rl_outcomes = _evaluate_model_outcomes(model, env_factory, 12, 100)
     random_outcomes = evaluate_masked_random_outcomes(
