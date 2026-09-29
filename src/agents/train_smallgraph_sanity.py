@@ -49,8 +49,13 @@ def main(config_path: str | Path | None = None):
         vec_env,
         verbose=1,
         tensorboard_log=str(RESULTS_LOGS_DIR),
+        n_steps=128,
+        batch_size=32,
+        learning_rate=0.0003,
+        gamma=0.99,
+        ent_coef=0.01,
     )
-    model.learn(total_timesteps=int(sanity_config.get("total_timesteps", 50_000)))
+    model.learn(total_timesteps=int(sanity_config.get("total_timesteps", 100_000)))
 
     output_dir = MODELS_DIR / "sanity_smallgraph"
     _, vecnormalize_path = save_training_artifacts(model, vec_env, output_dir)
