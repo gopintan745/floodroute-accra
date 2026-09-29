@@ -575,6 +575,39 @@ before raising the cap.
 
 ---
 
+## 2026-09-28 — Informed revisit: pardoned backtracking when new flood info is discovered
+
+**Decision:** A revisit to a node is **not penalized and does not terminate** the episode if the agent has discovered strictly more known-flooded edges within the reveal radius since its last visit to that node. This implements "rational backtracking" — the agent learns that a flood was discovered and returns to the decision point to replan.
+
+**Implementation:**
+
+- `visit_counts` changed from `dict[node, int]` to `dict[node, tuple[int, int]]` storing `(visit_count, known_flooded_at_visit)`
+- New method `_local_known_flood_count(node)` counts currently-known-flooded edges within `reveal_radius_hops`
+- On revisit: `informed_revisit = current_known > prior_known`
+  - If true: no penalty, no termination, `known_flooded_at_visit` updated to new higher value
+  - If false: existing penalty/termination logic applies (blind loop)
+
+**Alternatives considered:**
+
+- Always penalize revisits (simpler, but discourages legitimate replanning)
+- Use a fixed revisit budget per episode — adds hyperparameter, doesn't distinguish informed vs. blind
+- Track per-edge flood discovery rather than per-node — more granular but adds complexity
+
+**Why this one:**
+
+- Directly addresses the pathology where an agent discovers a flood on edge A→B, backtracks to A, and was previously penalized/terminated for "revisiting" A — which is exactly the adaptive behavior we want
+- `known_flooded_at_visit` auto-updates on informed revisits, so the *next* revisit needs even more new info to be pardoned — prevents infinite pardon cycles
+- Works with both `revisit_mode: "terminate"` and `"penalty"`
+- Minimal state change (two integers per visited node) and pure function `_local_known_flood_count`
+
+**What would change my mind:**
+
+- If agents exploit this by oscillating between two nodes while flood count stays constant — the strict `>` comparison prevents this
+- If `reveal_radius_hops` changes dynamically — current implementation uses the fixed config value at each check
+- If validation shows too many blind loops are pardoned due to mid-episode flood events — could add a minimum step gap between visits
+
+---
+
 ## TODO: next entries
 
 Example candidates for your next few entries (fill in once decided):
