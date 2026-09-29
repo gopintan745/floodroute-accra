@@ -31,3 +31,28 @@ overclaimed demo.
 
 (Fill in after Phase 6 — e.g. "RL agent outperforms dynamic Dijkstra on
 failure rate but not on mean travel time" or similar honest findings.)
+
+## Hyperparameter tuning asymmetry (fairness caveat)
+
+The RL agent undergoes extensive hyperparameter tuning via Optuna
+(~30–60 trials, each with 2–3 seeds, at ~25% of full training budget),
+while the classical baselines (`static_shortest_path`, `dynamic_replanning`,
+`masked_random`) receive **no equivalent tuning** — they are deterministic
+graph-search algorithms with no learnable parameters to optimize.
+
+This is a normal and defensible asymmetry: there is nothing to tune for a
+deterministic baseline. However, it means the final comparison is **not**
+a pure apples-to-apples "same compute budget" contest. The RL agent has
+had its hyperparameters selected to maximize performance on a held-out
+tuning scenario set, while baselines are evaluated out-of-the-box against
+the same scenarios.
+
+When reporting results, state plainly:
+
+- RL agent: tuned on separate tuning scenario set (seed=12345), then
+  re-validated on reserved final evaluation set (seed=42)
+- Baselines: no tuning, evaluated directly on final evaluation set
+- Tuning budget: N trials × M timesteps each (see `results/tuning/best_trial_revalidation.json`)
+
+This caveat should appear alongside any quantitative comparison table
+claiming "RL beats baselines."
