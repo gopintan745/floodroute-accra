@@ -31,3 +31,6 @@ pytest>=8.0
 
 # Notebooks
 jupyterlab>=4.1
+
+#Hyperparameter Tuning
+Optuna>=4.0
