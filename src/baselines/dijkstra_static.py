@@ -158,11 +158,8 @@ if __name__ == "__main__":
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from src.data_pipeline.fetch_osm import load_config
-    import osmnx as ox
 
-    config = load_config()
-    graph = ox.load_graphml(config["study_area"]["bbox"])
+    graph = ox.load_graphml(Path("data/processed/road_graph_full.graphml"))
 
     # Test with two points in the study area
     origin = (-0.23, 5.56)  # Kaneshie area
