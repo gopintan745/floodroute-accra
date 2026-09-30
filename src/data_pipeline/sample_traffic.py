@@ -64,9 +64,20 @@ def get_access_token() -> str:
     """Get the Mapbox access token from the environment or config.
 
     Priority order:
-    1. MAPBOX_ACCESS_TOKEN environment variable
-    2. config.yaml data_sources.traffic.mapbox_access_token
+    1. Kaggle Secrets MAPBOX_ACCESS_TOKEN
+    2. MAPBOX_ACCESS_TOKEN environment variable
+    3. config.yaml data_sources.traffic.mapbox_access_token
     """
+    # Try Kaggle secrets first
+    try:
+        from kaggle_secrets import UserSecretsClient
+        user_secrets = UserSecretsClient()
+        token = user_secrets.get_secret("MAPBOX_ACCESS_TOKEN")
+        if token:
+            return token.strip()
+    except (ImportError, Exception):
+        pass
+
     # Check environment first (from .env)
     token = os.environ.get("MAPBOX_ACCESS_TOKEN")
     if token:
@@ -80,7 +91,8 @@ def get_access_token() -> str:
 
     raise RuntimeError(
         "Mapbox access token not found. Set MAPBOX_ACCESS_TOKEN in .env "
-        "or add it to config/config.yaml under data_sources.traffic.mapbox_access_token"
+        "or add it to config/config.yaml under data_sources.traffic.mapbox_access_token "
+        "or set it in Kaggle Secrets."
     )
 
 

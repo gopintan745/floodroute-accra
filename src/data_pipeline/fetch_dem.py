@@ -53,14 +53,24 @@ def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
 
 
 def get_api_key() -> str:
-    """Read the OpenTopography API key from the environment. Fail loudly
+    """Read the OpenTopography API key from the environment or Kaggle Secrets. Fail loudly
     here rather than sending an unauthenticated request that will 401/403."""
+    try:
+        from kaggle_secrets import UserSecretsClient
+        user_secrets = UserSecretsClient()
+        key = user_secrets.get_secret("OPENTOPOGRAPHY_API_KEY")
+        if key:
+            return key
+    except (ImportError, Exception):
+        pass
+
     key = os.environ.get("OPENTOPOGRAPHY_API_KEY")
     if not key:
         raise RuntimeError(
             "OPENTOPOGRAPHY_API_KEY not set. Get a free key at "
             "https://portal.opentopography.org/requestService?service=api "
-            "then run: export OPENTOPOGRAPHY_API_KEY='your_key_here'"
+            "then run: export OPENTOPOGRAPHY_API_KEY='your_key_here' "
+            "or set it in Kaggle Secrets."
         )
     return key
 
