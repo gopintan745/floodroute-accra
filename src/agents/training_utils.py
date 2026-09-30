@@ -62,10 +62,15 @@ def resolve_center_node(graph: nx.MultiDiGraph, configured_node=None):
 
 
 def make_env_factory(
-    graph: nx.MultiDiGraph,
-    config: dict,
+    graph: nx.MultiDiGraph | str | Path,
+    config: dict | str | Path,
     mode: str = "train",
 ) -> Callable[[], AccraRoutingEnv]:
+    if isinstance(graph, (str, Path)):
+        graph = load_graph(graph)
+    if isinstance(config, (str, Path)):
+        config = load_config(config)
+
     def make_env() -> AccraRoutingEnv:
         return AccraRoutingEnv(
             graph,
@@ -79,11 +84,16 @@ def make_env_factory(
 
 
 def make_normalized_vec_env(
-    graph: nx.MultiDiGraph,
-    config: dict,
+    graph: nx.MultiDiGraph | str | Path,
+    config: dict | str | Path,
     n_envs: int,
     mode: str = "train",
 ) -> VecNormalize:
+    if isinstance(graph, (str, Path)):
+        graph = load_graph(graph)
+    if isinstance(config, (str, Path)):
+        config = load_config(config)
+
     vec_env = make_vec_env(make_env_factory(graph, config, mode), n_envs=n_envs)
     clip_reward = float(
         config.get("training", {}).get("ppo", {}).get("clip_reward", 10.0)
