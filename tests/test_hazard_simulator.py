@@ -158,3 +158,13 @@ def test_scenario_override_and_intensity_are_validated():
     })
     assert simulator.true_level("a", "b", 0) == 2
     assert simulator.intensity == 0.8
+
+
+def test_tradeoff_sanity_with_default_parameters():
+    """Verify break-even detour ratio for typical edges lies between 0.5x and 20x base time."""
+    config = CostModelConfig()
+    moderate_belief = np.array([0.6, 0.3, 0.1])
+    for base_time in (15.0, 30.0, 60.0):
+        expected = expected_cost(base_time, moderate_belief, config)
+        ratio = expected / base_time
+        assert 0.5 <= ratio <= 20.0, f"Break-even ratio {ratio} outside [0.5, 20.0] for base_time {base_time}"

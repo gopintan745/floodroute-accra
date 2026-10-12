@@ -371,3 +371,21 @@ def test_revisit_penalty_escalates_without_termination():
     assert second_info["revisit"] is True
     assert second_info["revisit_penalty"] > first_info["revisit_penalty"]
     assert env.visit_counts["start"][0] == 2
+
+
+def test_step_info_contains_graded_risk_fields():
+    """Verify info dict contains level, belief_before, and realized_travel_time."""
+    graph = nx.MultiDiGraph()
+    graph.add_node("start", x=0.0, y=0.0)
+    graph.add_node("next", x=0.0, y=1.0)
+    graph.add_edge("start", "next", key=0, travel_time=15.0, highway_class="primary", flood_susceptibility=0.5, road_quality_score=1.0)
+    env = _make_env_with_graph(graph)
+    env.reset(seed=1, options={"origin": "start", "destination": "next", "is_flood_day": True, "edge_levels": {("start", "next", 0): 1}})
+    _, _, _, _, info = env.step(_action_to(env, "next"))
+
+    assert "level" in info
+    assert info["level"] == 1
+    assert "belief_before" in info
+    assert isinstance(info["belief_before"], list) and len(info["belief_before"]) == 3
+    assert "realized_travel_time" in info
+    assert info["realized_travel_time"] > 0.0
