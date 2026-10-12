@@ -222,7 +222,12 @@ class HazardSimulator:
             probabilities = self.prior(*edge)
             self.true_levels[edge] = int(latent_rng.choice(3, p=probabilities))
 
-        overrides = scenario.get("edge_levels", {})
+        self._signal_rng = signal_rng
+        overrides = scenario.get("edge_levels")
+        if overrides is None and "flooded_edges" in scenario:
+            flooded = scenario["flooded_edges"]
+            overrides = {tuple(e): 2 for e in flooded} if isinstance(flooded, list) else {}
+        overrides = overrides or {}
         if isinstance(overrides, list):
             overrides = {tuple(record["edge"]): record["level"] for record in overrides}
         for edge_key, level in overrides.items():
@@ -325,6 +330,35 @@ class HazardSimulator:
         except KeyError as exc:
             raise KeyError(f"unknown graph edge {edge!r}") from exc
 
+    def set_edge_level(self, u, v, k, level: int) -> None:
+        """Update an edge's ground truth level and its sensor readings accordingly."""
+        if not self._episode_reset:
+            raise RuntimeError("reset_episode() must be called before set_edge_level()")
+        edge = self._normalize_edge_override((u, v, k))
+        level = int(level)
+        if level not in (0, 1, 2):
+            raise ValueError(f"edge level must be 0, 1, or 2, got {level}")
+        self.true_levels[edge] = level
+        signal_rng = getattr(self, "_signal_rng", np.random.default_rng(0))
+        for hop in range(self.reveal_radius_hops + 1):
+            if self._flood_config().get("signal_mode", "noisy") == "exact":
+                self.readings[edge][hop] = level
+            else:
+                confusion = self._confusion_matrix(hop)
+                self.readings[edge][hop] = int(signal_rng.choice(3, p=confusion[level]))
+
+    @property
+    def flooded_edges(self) -> set[EdgeId]:
+        """Backward-compatible view of non-dry edges."""
+        return {edge for edge, level in self.true_levels.items() if level > 0}
+
+    @flooded_edges.setter
+    def flooded_edges(self, edges) -> None:
+        """Backward-compatible setter for flooded edges."""
+        edge_set = {tuple(e) for e in (edges or ())}
+        for edge in self.edges:
+            self.set_edge_level(*edge, 2 if edge in edge_set else 0)
+
     def maybe_trigger_event(self, step: int) -> list[tuple[EdgeId, int]]:
         """Apply pre-sampled monotone one-level upgrades for this episode step."""
         if not self._episode_reset:
@@ -334,6 +368,6 @@ class HazardSimulator:
         applied = []
         for edge, scheduled_level in changes:
             if scheduled_level > self.true_levels[edge]:
-                self.true_levels[edge] = scheduled_level
+                self.set_edge_level(*edge, scheduled_level)
                 applied.append((edge, scheduled_level))
         return applied

@@ -89,9 +89,11 @@ class _FixedRainyRouteEnv(AccraRoutingEnv):
             options["destination"] = "goal"
         if "is_flood_day" not in options:
             options["is_flood_day"] = True
-        # Default flooded edges for the new graph (only used if not provided)
-        if "flooded_edges" not in options:
-            options["flooded_edges"] = [["junction", "shortcut", 0], ["shortcut", "goal", 0]]
+        if "edge_levels" not in options:
+            if "flooded_edges" in options:
+                options["edge_levels"] = {tuple(e): 2 for e in options["flooded_edges"]}
+            else:
+                options["edge_levels"] = {("junction", "shortcut", 0): 2, ("shortcut", "goal", 0): 2}
         
         observation, info = super().reset(seed=seed, options=options)
         self._origin_node = options["origin"]
@@ -455,7 +457,6 @@ def test_informed_revisit_pardoned_with_new_flood_info():
         "env": {
             "max_degree": None,
             "max_episode_steps": 64,
-            "flood_penalty": 50.0,
             "step_penalty": 0.1,
             "reveal_radius_hops": 1,
             "train_flood_day_rate": 1.0,
@@ -464,7 +465,14 @@ def test_informed_revisit_pardoned_with_new_flood_info():
             "revisit_penalty": 50.0,
             "revisit_penalty_growth": 2.0,
         },
-        "cost_model": {"flood_weight": 0.5, "quality_penalty_weight": 1.0},
+        "cost_model": {"quality_penalty_weight": 1.0},
+        "flood_model": {
+            "signal_mode": "exact",
+            "level_costs": {
+                "shallow": {"multiplier": 2.0, "penalty_s": 0.0},
+                "deep": {"multiplier": 3.0, "penalty_s": 600.0},
+            },
+        },
     }
     env = _FixedRainyRouteEnv(
         graph,
@@ -473,26 +481,26 @@ def test_informed_revisit_pardoned_with_new_flood_info():
         config=config,
         mode="train",
     )
-    # Start with NO flooded edges - we'll manually add the flood mid-episode
+    # Start with NO flooded edges
     env.reset(
         seed=0,
         options={
             "origin": "start",
             "destination": "goal",
             "is_flood_day": True,
-            "flooded_edges": [],  # Start with no flooded edges
+            "edge_levels": {("junction", "detour", 0): 0},
         },
     )
 
-    # Step 1: start -> junction (first visit, known_flooded=0)
+    # Step 1: start -> junction (first visit)
     env.step(_action_to(env, "junction"))
 
-    # Step 2: junction -> detour (NOT flooded yet)
+    # Step 2: junction -> detour (NOT flooded)
     _, _, terminated_on_detour, _, detour_info = env.step(_action_to(env, "detour"))
     assert terminated_on_detour is False
     assert detour_info["is_flooded"] is False
 
-    # Step 3: detour -> junction (revisit to junction, STILL known_flooded=0)
+    # Step 3: detour -> junction (revisit to junction, no new info)
     # This is a BLIND revisit - should be penalized/terminated
     _, reward_on_return, terminated_on_return, _, return_info = env.step(
         _action_to(env, "junction")
@@ -504,7 +512,7 @@ def test_informed_revisit_pardoned_with_new_flood_info():
 
 
 def test_informed_revisit_pardoned_when_flood_discovered_between_visits():
-    """A revisit is pardoned when a flood is discovered between the two visits to the same node."""
+    """A revisit is pardoned when new flood information is discovered between visits."""
     graph = nx.MultiDiGraph()
     for node, (x, y) in {
         "start": (0.0, 0.0),
@@ -533,7 +541,6 @@ def test_informed_revisit_pardoned_when_flood_discovered_between_visits():
         "env": {
             "max_degree": None,
             "max_episode_steps": 64,
-            "flood_penalty": 50.0,
             "step_penalty": 0.1,
             "reveal_radius_hops": 1,
             "train_flood_day_rate": 1.0,
@@ -542,7 +549,14 @@ def test_informed_revisit_pardoned_when_flood_discovered_between_visits():
             "revisit_penalty": 50.0,
             "revisit_penalty_growth": 2.0,
         },
-        "cost_model": {"flood_weight": 0.5, "quality_penalty_weight": 1.0},
+        "cost_model": {"quality_penalty_weight": 1.0},
+        "flood_model": {
+            "signal_mode": "exact",
+            "level_costs": {
+                "shallow": {"multiplier": 2.0, "penalty_s": 0.0},
+                "deep": {"multiplier": 3.0, "penalty_s": 600.0},
+            },
+        },
     }
     env = _FixedRainyRouteEnv(
         graph,
@@ -558,25 +572,21 @@ def test_informed_revisit_pardoned_when_flood_discovered_between_visits():
             "origin": "start",
             "destination": "goal",
             "is_flood_day": True,
-            "flooded_edges": [],
+            "edge_levels": {("junction", "detour", 0): 0},
         },
     )
 
-    # Step 1: start -> junction (first visit, known_flooded=0)
+    # Step 1: start -> junction (first visit)
     env.step(_action_to(env, "junction"))
 
     # Step 2: junction -> detour (NOT flooded)
     env.step(_action_to(env, "detour"))
 
-    # NOW add a flood on junction->detour (simulating mid-episode discovery)
-    env.hazard_sim.flooded_edges.add(("junction", "detour", 0))
+    # NOW simulate flood event/upgrade on junction->detour
+    env.hazard_sim.set_edge_level("junction", "detour", 0, 2)
 
     # Step 3: detour -> junction (revisit to junction)
-    # First visit: known_flooded=0
-    # Now: junction->detour is within 1 hop of detour, so when at junction it's known
-    # Actually, _local_known_flood_count(junction) checks from junction's position
-    # The edge junction->detour is adjacent to junction, so it's within 1 hop
-    # Since it's now in flooded_edges, known_flooded=1 > prior_known=0 -> INFORMED REVISIT
+    # Cost changed -> INFORMED REVISIT
     _, reward_on_return, terminated_on_return, _, return_info = env.step(
         _action_to(env, "junction")
     )
@@ -624,7 +634,6 @@ def test_informed_revisit_requires_strictly_more_info():
         "env": {
             "max_degree": None,
             "max_episode_steps": 64,
-            "flood_penalty": 50.0,
             "step_penalty": 0.1,
             "reveal_radius_hops": 1,
             "train_flood_day_rate": 1.0,
@@ -633,7 +642,14 @@ def test_informed_revisit_requires_strictly_more_info():
             "revisit_penalty": 50.0,
             "revisit_penalty_growth": 2.0,
         },
-        "cost_model": {"flood_weight": 0.5, "quality_penalty_weight": 1.0},
+        "cost_model": {"quality_penalty_weight": 1.0},
+        "flood_model": {
+            "signal_mode": "exact",
+            "level_costs": {
+                "shallow": {"multiplier": 2.0, "penalty_s": 0.0},
+                "deep": {"multiplier": 3.0, "penalty_s": 600.0},
+            },
+        },
     }
     env = _FixedRainyRouteEnv(
         graph,
@@ -649,7 +665,7 @@ def test_informed_revisit_requires_strictly_more_info():
             "origin": "start",
             "destination": "goal",
             "is_flood_day": True,
-            "flooded_edges": [],  # No pre-flooded edges
+            "edge_levels": {("junction", "detour", 0): 0},
         },
     )
 
@@ -659,7 +675,7 @@ def test_informed_revisit_requires_strictly_more_info():
     # Step 2: junction -> detour (not flooded)
     env.step(_action_to(env, "detour"))
 
-    # Step 3: detour -> junction (revisit, STILL 0 known floods - no new info)
+    # Step 3: detour -> junction (revisit, STILL dry - no new info)
     # This should be a BLIND REVISIT - penalty applies
     _, reward, terminated, _, info = env.step(_action_to(env, "junction"))
     assert terminated is False  # penalty mode doesn't terminate
@@ -668,24 +684,23 @@ def test_informed_revisit_requires_strictly_more_info():
     assert info["revisit_failure"] is False
 
     # Now simulate a mid-episode flood event on junction->detour
-    # (manually add to hazard_sim to test the informed revisit logic)
-    env.hazard_sim.flooded_edges.add(("junction", "detour", 0))
+    env.hazard_sim.set_edge_level("junction", "detour", 0, 2)
 
     # Step 4: junction -> detour (now flooded, agent discovers NEW flood)
     _, _, _, _, detour_info2 = env.step(_action_to(env, "detour"))
     assert detour_info2["is_flooded"] is True
 
-    # Step 5: detour -> junction (revisit, NOW 1 known flood vs 0 before)
+    # Step 5: detour -> junction (revisit, new flood info discovered)
     # This should be an INFORMED REVISIT - pardoned
     _, reward2, terminated2, _, info2 = env.step(_action_to(env, "junction"))
     assert terminated2 is False
-    assert info2["revisit_penalty"] == 0.0, "Informed revisit (0->1 known floods) should be pardoned"
+    assert info2["revisit_penalty"] == 0.0, "Informed revisit should be pardoned"
     assert info2["total_revisits"] == 1, "total_revisits should not increase for informed revisit"
     assert info2["revisit_failure"] is False
 
 
 def test_informed_revisit_resets_known_flood_count():
-    """After an informed revisit, the known_flooded_at_visit is updated, so next revisit needs even more new info."""
+    """After an informed revisit, the snapshot is updated, so next revisit needs even more new info."""
     graph = nx.MultiDiGraph()
     for node, (x, y) in {
         "start": (0.0, 0.0),
@@ -714,7 +729,6 @@ def test_informed_revisit_resets_known_flood_count():
         "env": {
             "max_degree": None,
             "max_episode_steps": 64,
-            "flood_penalty": 50.0,
             "step_penalty": 0.1,
             "reveal_radius_hops": 1,
             "train_flood_day_rate": 1.0,
@@ -723,7 +737,14 @@ def test_informed_revisit_resets_known_flood_count():
             "revisit_penalty": 50.0,
             "revisit_penalty_growth": 2.0,
         },
-        "cost_model": {"flood_weight": 0.5, "quality_penalty_weight": 1.0},
+        "cost_model": {"quality_penalty_weight": 1.0},
+        "flood_model": {
+            "signal_mode": "exact",
+            "level_costs": {
+                "shallow": {"multiplier": 2.0, "penalty_s": 0.0},
+                "deep": {"multiplier": 3.0, "penalty_s": 600.0},
+            },
+        },
     }
     env = _FixedRainyRouteEnv(
         graph,
@@ -739,34 +760,30 @@ def test_informed_revisit_resets_known_flood_count():
             "origin": "start",
             "destination": "goal",
             "is_flood_day": True,
-            "flooded_edges": [["junction", "detour", 0]],
+            "edge_levels": {("junction", "detour", 0): 2, ("detour", "junction", 0): 0},
         },
     )
 
-    # First loop: discover flood, informed revisit pardoned
-    env.step(_action_to(env, "junction"))           # visit junction (known=1)
-    env.step(_action_to(env, "detour"))              # discover flood on junction->detour
-    _, _, _, _, info1 = env.step(_action_to(env, "junction"))  # revisit junction (known=1, prior=1 -> INFORMED? No, 1 > 1 is False!)
-    # Wait - the first visit to junction had known=1 (junction->detour is within 1 hop and flooded)
-    # The revisit also sees known=1. Since 1 > 1 is False, this is a BLIND revisit!
-    # Let's verify this behavior...
-    assert info1["revisit_penalty"] == 50.0, "First revisit with same known count should be penalized"
+    # First loop: first visit to junction had junction->detour flooded
+    env.step(_action_to(env, "junction"))           # visit junction
+    env.step(_action_to(env, "detour"))              # traverse to detour
+    _, _, _, _, info1 = env.step(_action_to(env, "junction"))  # revisit junction (same conditions -> BLIND)
+    assert info1["revisit_penalty"] == 50.0, "First revisit with same conditions should be penalized"
     assert info1["total_revisits"] == 1
 
     # Add a NEW flood edge (detour->junction) within reveal radius
-    env.hazard_sim.flooded_edges.add(("detour", "junction", 0))
+    env.hazard_sim.set_edge_level("detour", "junction", 0, 2)
 
     # Second loop: NEW flood discovered
     env.step(_action_to(env, "detour"))              # flooded edge
-    _, _, _, _, info2 = env.step(_action_to(env, "junction"))  # revisit junction (known=2, prior=1 -> INFORMED!)
-    assert info2["revisit_penalty"] == 0.0, "Second revisit with more known floods (2>1) should be pardoned"
+    _, _, _, _, info2 = env.step(_action_to(env, "junction"))  # revisit junction (new flood -> INFORMED!)
+    assert info2["revisit_penalty"] == 0.0, "Second revisit with new flood information should be pardoned"
     assert info2["total_revisits"] == 1, "total_revisits unchanged"
 
     # Third loop: NO new floods
-    # Note: step to detour is also a BLIND revisit for detour (known=2, prior=2)
+    # Note: step to detour is also a BLIND revisit for detour
     # So total_revisits becomes 2 after detour, then 3 after junction
     env.step(_action_to(env, "detour"))
-    _, _, _, _, info3 = env.step(_action_to(env, "junction"))  # revisit junction (known=2, prior=2 -> BLIND!)
-    # total_revisits=3 (1 from first blind junction revisit + 1 from blind detour revisit + 1 from this blind junction revisit)
-    assert info3["revisit_penalty"] == 200.0, "Third revisit with same known count (2==2) should be penalized (escalated to 200)"
+    _, _, _, _, info3 = env.step(_action_to(env, "junction"))  # revisit junction (no new info -> BLIND!)
+    assert info3["revisit_penalty"] == 200.0, "Third revisit with same info should be penalized (escalated to 200)"
     assert info3["total_revisits"] == 3
