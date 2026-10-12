@@ -78,7 +78,10 @@ class HazardSimulator:
         self._seed_sequence = np.random.SeedSequence(seed)
 
     def _flood_config(self) -> dict:
-        return self.config.get("flood_model", {})
+        return self.config.get(
+            "flood_model",
+            self.config.get("flood_risk", {}).get("flood_model", {}),
+        )
 
     def _env_config(self) -> dict:
         return self.config.get("env", {})

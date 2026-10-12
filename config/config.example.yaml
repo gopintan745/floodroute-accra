@@ -26,21 +26,6 @@ data_sources:
 
 flood_risk:
   # v1 terrain-based susceptibility heuristic (see docs/design_decisions.md):
-
-  flood_model:
-    intensity_weight_alpha: 0.5
-    deep_fraction_min: 0.1
-    deep_fraction_max: 0.7
-    intensity_reference_percentile: 95
-    default_intensity_if_no_heavy_days: 0.5
-    mid_episode_event_base_rate: 0.0
-    signal_mode: noisy
-    level_costs:
-      shallow: {multiplier: 2.0, penalty_s: 0}
-      deep: {multiplier: 3.0, penalty_s: 600}
-    signal_confusion:
-      hop0: [[0.95, 0.05, 0.00], [0.05, 0.90, 0.05], [0.00, 0.10, 0.90]]
-      hop1: [[0.85, 0.13, 0.02], [0.12, 0.76, 0.12], [0.03, 0.22, 0.75]]
   # combines relative low elevation + local flatness, since full flow-
   # accumulation hydrological modeling is out of scope for a first pass.
   elevation_weight: 0.7
@@ -126,31 +111,32 @@ traffic_synthetic:
   offpeak_multiplier: 1.05              # applied at all non-peak hours, all classes
 
 cost_model:
-  # Weights for the effective_travel_time() cost function (src/common/cost_model.py).
-  # This function is shared by the RL env reward calculation and the Dijkstra baselines,
-  # ensuring apples-to-apples comparison.
-  #
-  # effective_travel_time = base_travel_time * traffic_multiplier * quality_multiplier * flood_multiplier
-  # where:
-  #   quality_multiplier = 1 + (1 - road_quality_score) * quality_penalty_weight
-  #   flood_multiplier   = 1 + flood_weight * flood_susceptibility
-  #
-  # Both weights are >= 0. Higher = stronger penalty for poor quality / high flood risk.
-  # flood_weight: how much extra travel time (proportional) a fully flood-susceptible edge (score=1)
-  #               adds vs. a zero-risk edge. E.g., 0.5 means +50% travel time at max flood risk.
-  # quality_penalty_weight: how much extra travel time a worst-quality edge (score=0) adds vs.
-  #                         best quality (score=1). E.g., 1.0 means 2x travel time at worst quality.
-  flood_weight: 0.5
+  # Shared quality penalty weight for effective travel time (src/common/cost_model.py).
+  # Quality multiplier = 1 + (1 - road_quality_score) * quality_penalty_weight.
   quality_penalty_weight: 1.0
+
+flood_model:
+  intensity_weight_alpha: 0.5
+  deep_fraction_min: 0.1
+  deep_fraction_max: 0.7
+  intensity_reference_percentile: 95
+  default_intensity_if_no_heavy_days: 0.5
+  mid_episode_event_base_rate: 0.0
+  signal_mode: noisy            # "exact" for deterministic unit tests
+  level_costs:                  # assumptions, justified in docs/design_decisions.md
+    shallow: {multiplier: 2.0, penalty_s: 0}
+    deep:    {multiplier: 3.0, penalty_s: 600}
+  signal_confusion:             # rows = true level, cols = reading
+    hop0: [[0.95, 0.05, 0.00], [0.05, 0.90, 0.05], [0.00, 0.10, 0.90]]
+    hop1: [[0.85, 0.13, 0.02], [0.12, 0.76, 0.12], [0.03, 0.22, 0.75]]
 
 env:
   max_degree: null   # null = auto-compute from graph at env init; set explicitly only to override
   max_episode_steps: 64  # static routes: max 59 hops in a 2,000-pair sample
-  flood_penalty: 50          # minutes-equivalent penalty for hitting a flooded edge
   step_penalty: 0.1          # small per-step penalty to discourage wandering
   reveal_radius_hops: 1      # undirected graph hops with realized flood visibility
   train_flood_day_rate: 0.35        # deliberate oversampling during training
-  mid_episode_event_base_rate: 0.03 # per-step rate scaled by flood susceptibility
+  mid_episode_event_base_rate: 0.0  # deprecated; prefer flood_model setting
   revisit_mode: terminate     # terminate or penalty
   revisit_penalty: 50         # base penalty for the first revisit
   revisit_penalty_growth: 2.0 # multiplier applied on each subsequent revisit

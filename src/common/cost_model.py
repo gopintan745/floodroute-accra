@@ -21,7 +21,10 @@ class CostModelConfig:
     @classmethod
     def from_config(cls, config: dict) -> "CostModelConfig":
         cost_model = config.get("cost_model", {})
-        flood_model = config.get("flood_model", {})
+        flood_model = config.get(
+            "flood_model",
+            config.get("flood_risk", {}).get("flood_model", {}),
+        )
         level_costs = flood_model.get("level_costs", {})
         shallow = level_costs.get("shallow", {})
         deep = level_costs.get("deep", {})
