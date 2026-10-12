@@ -18,7 +18,7 @@ genuinely stochastic, partially-observable hazard in this project.
 is used in two different ways depending on context — do not conflate them:
 
 | Context | `flood_susceptibility` passed in | Flood penalty |
-|---|---|---|
+| --- | --- | --- |
 | **Baseline planning** (`dijkstra_dynamic.py`) | Real static value (epistemic risk weight — baseline must commit to a route blind) | None (folded into the multiplier) |
 | **Environment reward** (once an edge is *traversed*) | `0` (outcome is now known, not a probability) | Additive: `config.env.flood_penalty` if `hazard_simulator.is_flooded(edge)` is `True` this episode |
 

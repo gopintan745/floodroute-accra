@@ -70,7 +70,7 @@ in `rainfall_climatology.json`.
 
 **Prior per edge** (for edge susceptibility `s`, on a flood day):
 
-```
+```python
 lambda   = clip(s * (1 - alpha + alpha * I), 0, 1)     # P(edge is wet at all)
 f_deep   = deep_fraction_min + (deep_fraction_max - deep_fraction_min) * I
 P(deep)    = lambda * f_deep
@@ -300,7 +300,7 @@ Remove or deprecate `env.flood_penalty`. Keep `train_flood_day_rate`,
 
 ## Tests
 
-**Group A (hazard simulator and cost model)**
+### Group A (hazard simulator and cost model)
 
 - [ ] **Prior calibration**: over a grid of `(s, I)`, sampled level
       frequencies match the prior formula within about 3 sigma (N >= 200k).
@@ -324,7 +324,7 @@ Remove or deprecate `env.flood_penalty`. Keep `train_flood_day_rate`,
       time. Outside that range the config makes the problem trivial
       ("always avoid" or "never avoid").
 
-**Group B (environment)**
+### Group B (environment)
 
 - [ ] `_build_observation` never calls `true_level` (monkeypatch it to raise).
 - [ ] Observation shapes match `observation_space`; `action_masks()` still
@@ -333,7 +333,7 @@ Remove or deprecate `env.flood_penalty`. Keep `train_flood_day_rate`,
 - [ ] Port the old tests: the loop-termination test should use an
       `edge_levels` override instead of `flooded_edges`.
 
-**Group C (does it learn risk assessment): break-even toy benchmark**
+### Group C (does it learn risk assessment): break-even toy benchmark
 
 Replace the fixed rainy-day toy graph with a parametrized one: a risky
 shortcut with a fixed mild belief versus a safe detour whose extra length is
