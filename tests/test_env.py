@@ -42,52 +42,42 @@ def _make_env_with_graph(
     revisit_mode="terminate",
 ):
     env = AccraRoutingEnv(
-        graph_path="data/processed/road_graph_full.graphml",
+        graph_path=graph,
         traffic_profile_path="data/processed/traffic_profile.parquet",
         climatology_path="data/processed/rainfall_climatology.json",
         config={
             "env": {
                 "max_episode_steps": max_episode_steps,
-                "flood_penalty": flood_penalty,
                 "step_penalty": step_penalty,
                 "reveal_radius_hops": 1,
                 "train_flood_day_rate": 0.0,
-                "mid_episode_event_base_rate": 0.0,
                 "max_degree": None,
                 "revisit_mode": revisit_mode,
                 "revisit_penalty": 50.0,
                 "revisit_penalty_growth": 2.0,
             },
-            "cost_model": {"flood_weight": 0.5, "quality_penalty_weight": 1.0},
+            "cost_model": {"quality_penalty_weight": 1.0},
+            "flood_model": {
+                "signal_mode": "exact",
+                "mid_episode_event_base_rate": 0.0,
+                "level_costs": {
+                    "shallow": {"multiplier": 2.0, "penalty_s": 0.0},
+                    "deep": {"multiplier": 3.0, "penalty_s": 600.0},
+                },
+            },
         },
         mode="train",
     )
-    env.graph = graph
-    env.graph_wrapper = GraphWrapper(graph, max_degree=env.graph_wrapper.max_degree)
-    env.action_space = spaces.Discrete(env.graph_wrapper.max_degree)
     env.traffic_lookup = {}
-    env.hazard_sim.graph = graph
-    env.hazard_sim.flood_susceptibility = {
-        (u, v, key): HazardSimulator._edge_susceptibility(data)
-        for u, v, key, data in graph.edges(keys=True, data=True)
-    }
-    env.hazard_sim.flooded_edges = set()
-    env.hazard_sim.current_position = None
-    env.hazard_sim._episode_reset = False
-    env.hazard_sim.step = 0
-    env.hazard_sim.is_flood_day = False
     env.observation_space = spaces.Dict(
         {
             "current_node_features": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
             "destination_node_features": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
             "goal_relative_features": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
-            "local_edge_features": spaces.Box(low=-np.inf, high=np.inf, shape=(env.graph_wrapper.max_degree, 4), dtype=np.float32),
+            "global_features": spaces.Box(low=0.0, high=1.0, shape=(2,), dtype=np.float32),
+            "local_edge_features": spaces.Box(low=-np.inf, high=np.inf, shape=(env.graph_wrapper.max_degree, 8), dtype=np.float32),
         }
     )
-    env.episode_context = {"hour": 0, "is_weekend": False, "is_flood_day": False}
-    env.hazard_sim.reset_episode()
-    env.hazard_sim.is_flood_day = False
-    env.hazard_sim.flooded_edges = set()
     return env
 
 
@@ -147,7 +137,8 @@ def test_env_smoke_and_masks_are_exposed_for_sb3():
                 "mid_episode_event_base_rate": 0.0,
                 "max_degree": None,
             },
-            "cost_model": {"flood_weight": 0.5, "quality_penalty_weight": 1.0},
+            "cost_model": {"quality_penalty_weight": 1.0},
+            "flood_model": {"signal_mode": "exact", "mid_episode_event_base_rate": 0.0},
         },
         mode="train",
     )
@@ -203,20 +194,36 @@ def test_partial_observability_boundary():
         "d": (0.0, 3.0),
     }.items():
         graph.add_node(node, x=coords[0], y=coords[1])
-    graph.add_edge("a", "b", key=0, travel_time=10.0, highway_class="residential", flood_risk=0.2, road_quality_score=1.0)
-    graph.add_edge("b", "c", key=0, travel_time=10.0, highway_class="residential", flood_risk=0.2, road_quality_score=1.0)
-    graph.add_edge("c", "d", key=0, travel_time=10.0, highway_class="residential", flood_risk=0.25, road_quality_score=1.0)
+    graph.add_edge("a", "b", key=0, travel_time=10.0, highway_class="residential", flood_susceptibility=0.2, road_quality_score=1.0)
+    graph.add_edge("b", "c", key=0, travel_time=10.0, highway_class="residential", flood_susceptibility=0.2, road_quality_score=1.0)
+    graph.add_edge("c", "d", key=0, travel_time=10.0, highway_class="residential", flood_susceptibility=0.25, road_quality_score=1.0)
 
     env = _make_env_with_graph(graph)
-    env.reset(seed=0)
-    env._current_node = "a"
-    env.hazard_sim.current_position = "a"
-    env.hazard_sim.flooded_edges = {("a", "b", 0)}
+    env.reset(seed=0, options={
+        "origin": "a", "destination": "d", "is_flood_day": True,
+        "intensity": 0.5, "edge_levels": {("a", "b", 0): 2, ("c", "d", 0): 2},
+    })
+    local_belief = env.hazard_sim.belief("a", "b", 0)
+    outside_belief = env.hazard_sim.belief("c", "d", 0)
+    assert local_belief[2] == 1.0
+    np.testing.assert_array_equal(
+        outside_belief, env.hazard_sim.prior("c", "d", 0)
+    )
+    assert outside_belief[2] < 1.0
 
-    local_feature = env._edge_feature_vector(("a", "b", 0), 0, False)
-    outside_feature = env._edge_feature_vector(("c", "d", 0), 0, False)
-    assert local_feature[0] == 1.0
-    assert outside_feature[0] == 0.25
+
+def test_observation_never_reads_true_level(monkeypatch):
+    graph = _make_cardinal_graph()
+    env = _make_env_with_graph(graph)
+    env.reset(seed=12, options={"origin": "c", "destination": "n"})
+
+    def fail_if_truth_is_requested(*_args, **_kwargs):
+        raise AssertionError("observation leaked latent flood level")
+
+    monkeypatch.setattr(env.hazard_sim, "true_level", fail_if_truth_is_requested)
+    observation, _ = env._build_observation()
+
+    assert env.observation_space.contains(observation)
 
 
 def test_reset_samples_only_directly_reachable_destinations():
@@ -251,8 +258,8 @@ def test_reward_reduces_correctly_on_boring_episode():
     graph = nx.MultiDiGraph()
     for node, coords in {"start": (0.0, 0.0), "mid": (0.0, 1.0), "far": (0.0, 2.0)}.items():
         graph.add_node(node, x=coords[0], y=coords[1])
-    graph.add_edge("start", "mid", key=0, travel_time=12.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
-    graph.add_edge("mid", "far", key=0, travel_time=12.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
+    graph.add_edge("start", "mid", key=0, travel_time=12.0, highway_class="residential", flood_susceptibility=0.0, road_quality_score=1.0)
+    graph.add_edge("mid", "far", key=0, travel_time=12.0, highway_class="residential", flood_susceptibility=0.0, road_quality_score=1.0)
 
     env = _make_env_with_graph(graph, step_penalty=0.1)
     env.reset(seed=0)
@@ -263,7 +270,7 @@ def test_reward_reduces_correctly_on_boring_episode():
     env.hazard_sim.flooded_edges = set()
     env.hazard_sim.set_current_position("start")
     env.visited_nodes = {"start"}
-    env.visit_counts = {"start": 1}
+    env.visit_counts = {"start": (1, {})}
     env.total_revisits = 0
     env.episode_context["is_flood_day"] = False
 
@@ -277,8 +284,8 @@ def test_termination_vs_truncation():
     graph = nx.MultiDiGraph()
     for node, coords in {"start": (0.0, 0.0), "mid": (0.0, 1.0), "goal": (0.0, 2.0)}.items():
         graph.add_node(node, x=coords[0], y=coords[1])
-    graph.add_edge("start", "mid", key=0, travel_time=5.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
-    graph.add_edge("mid", "goal", key=0, travel_time=5.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
+    graph.add_edge("start", "mid", key=0, travel_time=5.0, highway_class="residential", flood_susceptibility=0.0, road_quality_score=1.0)
+    graph.add_edge("mid", "goal", key=0, travel_time=5.0, highway_class="residential", flood_susceptibility=0.0, road_quality_score=1.0)
 
     env = _make_env_with_graph(graph, max_episode_steps=1, step_penalty=0.0)
     env.reset(seed=0)
@@ -288,7 +295,7 @@ def test_termination_vs_truncation():
     env.hazard_sim.is_flood_day = False
     env.hazard_sim.flooded_edges = set()
     env.visited_nodes = {"start"}
-    env.visit_counts = {"start": 1}
+    env.visit_counts = {"start": (1, {})}
     env.total_revisits = 0
 
     _, reward, terminated, truncated, info = env.step(0)
@@ -305,7 +312,7 @@ def test_termination_vs_truncation():
     env2.hazard_sim.is_flood_day = False
     env2.hazard_sim.flooded_edges = set()
     env2.visited_nodes = {"start"}
-    env2.visit_counts = {"start": 1}
+    env2.visit_counts = {"start": (1, {})}
     env2.total_revisits = 0
 
     _, reward2, terminated2, truncated2, info2 = env2.step(0)
@@ -325,9 +332,9 @@ def test_revisit_terminates_as_distinct_failure():
     graph = nx.MultiDiGraph()
     for node, coords in {"start": (0.0, 0.0), "mid": (0.0, 1.0), "goal": (0.0, 2.0)}.items():
         graph.add_node(node, x=coords[0], y=coords[1])
-    graph.add_edge("start", "mid", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
-    graph.add_edge("mid", "start", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
-    graph.add_edge("mid", "goal", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
+    graph.add_edge("start", "mid", key=0, travel_time=1.0, highway_class="residential", flood_susceptibility=0.0, road_quality_score=1.0)
+    graph.add_edge("mid", "start", key=0, travel_time=1.0, highway_class="residential", flood_susceptibility=0.0, road_quality_score=1.0)
+    graph.add_edge("mid", "goal", key=0, travel_time=1.0, highway_class="residential", flood_susceptibility=0.0, road_quality_score=1.0)
 
     env = _make_env_with_graph(graph, revisit_mode="terminate")
     env.reset(seed=0, options={"origin": "start", "destination": "goal"})
@@ -348,9 +355,9 @@ def test_revisit_penalty_escalates_without_termination():
     graph = nx.MultiDiGraph()
     for node, coords in {"start": (0.0, 0.0), "mid": (0.0, 1.0), "goal": (0.0, 2.0)}.items():
         graph.add_node(node, x=coords[0], y=coords[1])
-    graph.add_edge("start", "mid", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
-    graph.add_edge("mid", "start", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
-    graph.add_edge("start", "goal", key=0, travel_time=1.0, highway_class="residential", flood_risk=0.0, road_quality_score=1.0)
+    graph.add_edge("start", "mid", key=0, travel_time=1.0, highway_class="residential", flood_susceptibility=0.0, road_quality_score=1.0)
+    graph.add_edge("mid", "start", key=0, travel_time=1.0, highway_class="residential", flood_susceptibility=0.0, road_quality_score=1.0)
+    graph.add_edge("start", "goal", key=0, travel_time=1.0, highway_class="residential", flood_susceptibility=0.0, road_quality_score=1.0)
 
     env = _make_env_with_graph(graph, revisit_mode="penalty")
     env.reset(seed=0, options={"origin": "start", "destination": "goal"})
@@ -363,4 +370,4 @@ def test_revisit_penalty_escalates_without_termination():
     assert first_info["revisit"] is True
     assert second_info["revisit"] is True
     assert second_info["revisit_penalty"] > first_info["revisit_penalty"]
-    assert env.visit_counts["start"] == 2
+    assert env.visit_counts["start"][0] == 2

@@ -403,6 +403,7 @@ def compute_rainfall_climatology(rainfall_path: Path, flood_threshold_mm: float 
         "monthly_max_precip_mm": monthly_max_precip,
         "total_days": len(all_precip),
         "heavy_rain_days_total": heavy_total,
+        "heavy_day_precip_mm": [p for p in all_precip if p >= flood_threshold_mm],
         "overall_heavy_rain_frequency": round(heavy_total / len(all_precip), 4) if all_precip else 0.0,
         "record_start": times[0],
         "record_end": times[-1],

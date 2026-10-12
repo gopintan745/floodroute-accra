@@ -14,6 +14,14 @@ overclaimed demo.
       hydrological model
 - [ ] Road quality labels are (manual spot-check / heuristic) — note
       coverage and confidence
+- Flood severity levels (dry/shallow/deep), their travel-time multipliers,
+      deep penalty, and signal confusion matrices are synthetic assumptions;
+      no measured flood-depth or edge-level severity dataset is currently
+      available for Accra. Treat results as a calibrated simulation study, not
+      validated flood-depth prediction.
+- The v1 mid-episode severity upgrade rate is zero. Enabling upgrades without
+      a time-dependent belief prior can make beliefs miscalibrated as an episode
+      progresses.
 
 ## Validation
 

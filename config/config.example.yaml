@@ -26,15 +26,29 @@ data_sources:
 
 flood_risk:
   # v1 terrain-based susceptibility heuristic (see docs/design_decisions.md):
+
+  flood_model:
+    intensity_weight_alpha: 0.5
+    deep_fraction_min: 0.1
+    deep_fraction_max: 0.7
+    intensity_reference_percentile: 95
+    default_intensity_if_no_heavy_days: 0.5
+    mid_episode_event_base_rate: 0.0
+    signal_mode: noisy
+    level_costs:
+      shallow: {multiplier: 2.0, penalty_s: 0}
+      deep: {multiplier: 3.0, penalty_s: 600}
+    signal_confusion:
+      hop0: [[0.95, 0.05, 0.00], [0.05, 0.90, 0.05], [0.00, 0.10, 0.90]]
+      hop1: [[0.85, 0.13, 0.02], [0.12, 0.76, 0.12], [0.03, 0.22, 0.75]]
   # combines relative low elevation + local flatness, since full flow-
   # accumulation hydrological modeling is out of scope for a first pass.
   elevation_weight: 0.7
   flatness_weight: 0.3
-  # Percentile clipping before normalizing elevation, to avoid a single
   # noisy DEM pixel skewing the whole study area's relative scale.
   elevation_clip_percentiles: [2, 98]
   # mm/day threshold used to define a "heavy rain day" in the rainfall
-  # climatology — commonly cited threshold for urban flash-flood risk in
+  mid_episode_event_base_rate: 0.0   # deprecated; prefer flood_model setting
   # West African coastal cities; adjust if local sources suggest otherwise.
   heavy_rain_threshold_mm: 20
   # UTM zone for reprojecting the DEM before computing slope in real
@@ -154,4 +168,5 @@ training:
 evaluation:
   num_scenarios: 100
   num_flood_scenarios: 30
+  num_decision_relevant_scenarios: 30
   seed: 42

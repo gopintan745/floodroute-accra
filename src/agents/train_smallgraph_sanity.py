@@ -20,6 +20,7 @@ from src.agents.training_utils import (
     evaluate_static_shortest_path_outcomes,
     load_config,
     load_graph,
+    make_evaluation_scenarios,
     make_env_factory,
     make_normalized_vec_env,
     resolve_center_node,
@@ -63,18 +64,41 @@ def main(config_path: str | Path | None = None):
 
     eval_config = dict(config)
     eval_factory = make_env_factory(subgraph, eval_config, mode="eval")
-    random_scores = evaluate_masked_random(eval_factory, seed=int(config.get("evaluation", {}).get("seed", 42)))
-    static_scores = evaluate_static_shortest_path(eval_factory, seed=int(config.get("evaluation", {}).get("seed", 42)))
-    trained_scores = evaluate_model(model, subgraph, eval_config, vecnormalize_path, seed=int(config.get("evaluation", {}).get("seed", 42)))
+    eval_seed = int(config.get("evaluation", {}).get("seed", 42))
+    scenario_count = int(config.get("training", {}).get("sanity_check", {}).get("evaluation_scenarios", 12))
+    flood_scenarios = make_evaluation_scenarios(
+        eval_factory, scenario_count, eval_seed, flood_only=True
+    )
+    decision_scenarios = make_evaluation_scenarios(
+        eval_factory, scenario_count, eval_seed + 1, decision_relevant=True
+    )
+    scenarios = flood_scenarios + decision_scenarios
+    random_scores = evaluate_masked_random(
+        eval_factory, seed=eval_seed, scenarios=scenarios
+    )
+    static_scores = evaluate_static_shortest_path(
+        eval_factory, seed=eval_seed, scenarios=scenarios
+    )
+    trained_scores = evaluate_model(
+        model, subgraph, eval_config, vecnormalize_path,
+        seed=eval_seed, scenarios=scenarios,
+    )
     checks = summarize_sanity_checks(trained_scores, random_scores, static_scores)
     checks["trained_eval_outcomes"] = summarize_outcomes(
-        evaluate_model_outcomes(model, subgraph, eval_config, vecnormalize_path, seed=int(config.get("evaluation", {}).get("seed", 42)))
+        evaluate_model_outcomes(
+            model, subgraph, eval_config, vecnormalize_path,
+            seed=eval_seed, scenarios=scenarios,
+        )
     )
     checks["masked_random_eval_outcomes"] = summarize_outcomes(
-        evaluate_masked_random_outcomes(eval_factory, seed=int(config.get("evaluation", {}).get("seed", 42)))
+        evaluate_masked_random_outcomes(
+            eval_factory, seed=eval_seed, scenarios=scenarios
+        )
     )
     checks["static_shortest_path_eval_outcomes"] = summarize_outcomes(
-        evaluate_static_shortest_path_outcomes(eval_factory, seed=int(config.get("evaluation", {}).get("seed", 42)))
+        evaluate_static_shortest_path_outcomes(
+            eval_factory, seed=eval_seed, scenarios=scenarios
+        )
     )
     for name, value in checks.items():
         logger.info("sanity_check.%s=%s", name, value)

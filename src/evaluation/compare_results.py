@@ -37,15 +37,17 @@ def write_summary(comparison: dict, output_path: str | Path = DEFAULT_SUMMARY) -
   lines = [
     "# Routing Evaluation Summary",
     "",
-    "| Method | Episodes | Mean time | Median time | Variance | Completion | Route failure | Flooded edge | Blocked edge |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| Method | Episodes | Mean | Median | P95 | CVaR95 | Completion | Wet edges/ep | Deep edges/ep | Deep ep rate | Revisits | Mean regret | P95 regret |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ]
   for method, summary in comparison.get("methods", {}).items():
     lines.append(
       f"| {method} | {summary['episodes']} | {summary['mean_travel_time']:.3f} "
-      f"| {summary['median_travel_time']:.3f} | {summary['variance_travel_time']:.3f} "
-      f"| {summary['completion_rate']:.3f} | {summary['route_failure_rate']:.3f} "
-      f"| {summary['flooded_edge_rate']:.3f} | {summary['blocked_edge_rate']:.3f} |"
+      f"| {summary['median_travel_time']:.3f} | {summary['p95_travel_time']:.3f} "
+      f"| {summary['cvar95_travel_time']:.3f} | {summary['completion_rate']:.3f} "
+      f"| {summary['mean_wet_edge_traversals']:.3f} | {summary['mean_deep_edge_traversals']:.3f} "
+      f"| {summary['deep_traversal_episode_rate']:.3f} | {summary['mean_total_revisits']:.3f} "
+      f"| {summary['mean_regret_vs_oracle']:.3f} | {summary['p95_regret_vs_oracle']:.3f} |"
     )
   output_path = Path(output_path)
   output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -24,6 +24,7 @@ from src.env.accra_routing_env import AccraRoutingEnv
 from src.baselines.dijkstra_dynamic import (
   build_traffic_lookup,
   dynamic_shortest_path_with_replanning,
+  oracle_shortest_path,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +39,11 @@ def _try_build_scenario(graph, env_ctor_args, config, seed, mode="eval") -> dict
   _, info = env.reset(seed=seed)
   if not nx.has_path(graph, info["origin"], info["destination"]):
     return None
+  edge_levels = [
+    {"edge": list(edge), "level": int(level)}
+    for edge, level in sorted(env.hazard_sim.true_levels.items(), key=lambda item: repr(item[0]))
+    if level > 0
+  ]
   return {
     "seed": int(seed),
     "origin": info["origin"],
@@ -46,12 +52,8 @@ def _try_build_scenario(graph, env_ctor_args, config, seed, mode="eval") -> dict
     "hour": int(info["hour"]),
     "is_weekend": bool(info["is_weekend"]),
     "is_flood_day": bool(info["is_flood_day"]),
-    "flooded_edges": [list(edge) for edge in sorted(env.hazard_sim.flooded_edges, key=str)],
-    "flood_events": [
-      {"step": int(step), "edges": [list(edge) for edge in edges]}
-      for step, edges in sorted(env.hazard_sim.event_schedule.items())
-      if edges
-    ],
+    "intensity": float(info["intensity"]),
+    "edge_levels": edge_levels,
   }
 
 
@@ -62,18 +64,37 @@ def generate_scenarios(
   num_scenarios,
   num_flood_scenarios,
   seed,
+  num_decision_relevant_scenarios=None,
   max_attempts=200_000,
 ) -> dict:
-  """Generate natural and flood-stratified, replayable scenario records."""
+  """Generate natural, flood, and decision-relevant replayable scenarios."""
   rng = np.random.default_rng(seed)
 
-  def draw_until(target_count, flood_only):
+  def is_decision_relevant(record):
+    if not record["is_flood_day"]:
+      return False
+    try:
+      route = nx.shortest_path(
+        graph, record["origin"], record["destination"],
+        weight=lambda _u, _v, edge_data: min(
+          float(edge.get("travel_time", 0.0)) for edge in edge_data.values()
+        ),
+      )
+    except nx.NetworkXNoPath:
+      return False
+    wet_edges = {tuple(item["edge"]) for item in record["edge_levels"]}
+    return any(
+      any((u, v, key) in wet_edges for key in graph.get_edge_data(u, v, default={}))
+      for u, v in zip(route[:-1], route[1:])
+    )
+
+  def draw_until(target_count, predicate=lambda _record: True):
     results, attempts = [], 0
     while len(results) < target_count and attempts < max_attempts:
       candidate = int(rng.integers(0, 2**31))
       record = _try_build_scenario(graph, env_ctor_args, config, candidate)
       attempts += 1
-      if record and (not flood_only or record["is_flood_day"]):
+      if record and predicate(record):
         results.append(record)
     if len(results) < target_count:
       raise RuntimeError(
@@ -83,8 +104,14 @@ def generate_scenarios(
     return results
 
   return {
-    "natural": draw_until(int(num_scenarios), flood_only=False),
-    "flood_stratified": draw_until(int(num_flood_scenarios), flood_only=True),
+    "natural": draw_until(int(num_scenarios)),
+    "flood_stratified": draw_until(
+      int(num_flood_scenarios), lambda record: record["is_flood_day"]
+    ),
+    "decision_relevant": draw_until(
+      int(num_decision_relevant_scenarios if num_decision_relevant_scenarios is not None else num_flood_scenarios),
+      is_decision_relevant,
+    ),
   }
 
 
@@ -104,7 +131,8 @@ def _run_env_policy(env, scenario, action_selector) -> dict:
   observation, reset_info = env.reset(options={"scenario": scenario})
   total_reward = 0.0
   realized_time = 0.0
-  flooded_edges = 0
+  wet_edges = 0
+  deep_edges = 0
   terminated = truncated = False
   final_info = {}
   while not (terminated or truncated):
@@ -112,7 +140,8 @@ def _run_env_policy(env, scenario, action_selector) -> dict:
     observation, reward, terminated, truncated, final_info = env.step(action)
     total_reward += float(reward)
     realized_time += float(final_info.get("realized_travel_time", 0.0))
-    flooded_edges += int(final_info.get("is_flooded", False))
+    wet_edges += int(final_info.get("level", 0) > 0)
+    deep_edges += int(final_info.get("level", 0) == 2)
   return {
     "scenario_seed": int(scenario["seed"]),
     "reward": float(total_reward),
@@ -120,7 +149,10 @@ def _run_env_policy(env, scenario, action_selector) -> dict:
     "success": bool(final_info.get("success", False)),
     "dead_end": bool(final_info.get("dead_end", False)),
     "truncated": bool(final_info.get("truncated", False)),
-    "flooded_edges": int(flooded_edges),
+    "wet_edge_traversals": wet_edges,
+    "deep_edge_traversals": deep_edges,
+    "deep_traversal_episode": deep_edges > 0,
+    "total_revisits": int(final_info.get("total_revisits", 0)),
     "flood_day": bool(reset_info["is_flood_day"]),
   }
 
@@ -159,12 +191,44 @@ def _evaluate_dynamic(env, scenario) -> dict:
   )
   return {
     "scenario_seed": int(scenario["seed"]),
+    "reward": float(-result["total_realized_time"] - result.get("revisit_penalty", 0.0)),
+    "realized_travel_time": float(result["total_realized_time"]),
+    "success": bool(result["reached_destination"]),
+    "dead_end": False,
+    "truncated": not bool(result["reached_destination"]) and not bool(result.get("revisit_failure")),
+    "revisit_failure": bool(result.get("revisit_failure", False)),
+    "wet_edge_traversals": int(result.get("wet_edge_traversals", 0)),
+    "deep_edge_traversals": int(result.get("deep_edge_traversals", 0)),
+    "deep_traversal_episode": bool(result.get("deep_edge_traversals", 0)),
+    "total_revisits": int(result.get("total_revisits", 0)),
+    "flood_day": bool(scenario["is_flood_day"]),
+  }
+
+
+def _evaluate_oracle(env, scenario) -> dict:
+  env.reset(options={"scenario": scenario})
+  result = oracle_shortest_path(
+    graph=env.graph,
+    hazard_sim=env.hazard_sim,
+    traffic_lookup=build_traffic_lookup(env.traffic_profile),
+    origin=(float(env.graph.nodes[scenario["origin"]]["x"]), float(env.graph.nodes[scenario["origin"]]["y"])),
+    destination=(float(env.graph.nodes[scenario["destination"]]["x"]), float(env.graph.nodes[scenario["destination"]]["y"])),
+    hour=int(scenario["hour"]),
+    is_weekend=bool(scenario["is_weekend"]),
+    cost_cfg=env.cost_cfg,
+  )
+  levels = [env.hazard_sim.true_level(*edge) for edge in result.get("edges_traversed", [])]
+  return {
+    "scenario_seed": int(scenario["seed"]),
     "reward": float(-result["total_realized_time"]),
     "realized_travel_time": float(result["total_realized_time"]),
     "success": bool(result["reached_destination"]),
     "dead_end": False,
-    "truncated": not bool(result["reached_destination"]),
-    "flooded_edges": None,
+    "truncated": False,
+    "wet_edge_traversals": sum(level > 0 for level in levels),
+    "deep_edge_traversals": sum(level == 2 for level in levels),
+    "deep_traversal_episode": 2 in levels,
+    "total_revisits": 0,
     "flood_day": bool(scenario["is_flood_day"]),
   }
 
@@ -178,7 +242,7 @@ def _evaluate_rl_scenario(model, vec_env, base_env, scenario) -> dict:
   })
   total_reward = 0.0
   realized_time = 0.0
-  flooded_edges = 0
+  wet_edges = deep_edges = 0
   terminated = truncated = False
   final_info = {}
   while not (terminated or truncated):
@@ -194,7 +258,8 @@ def _evaluate_rl_scenario(model, vec_env, base_env, scenario) -> dict:
     })
     total_reward += float(reward)
     realized_time += float(final_info.get("realized_travel_time", 0.0))
-    flooded_edges += int(final_info.get("is_flooded", False))
+    wet_edges += int(final_info.get("level", 0) > 0)
+    deep_edges += int(final_info.get("level", 0) == 2)
   return {
     "scenario_seed": int(scenario["seed"]),
     "reward": float(total_reward),
@@ -202,7 +267,10 @@ def _evaluate_rl_scenario(model, vec_env, base_env, scenario) -> dict:
     "success": bool(final_info.get("success", False)),
     "dead_end": bool(final_info.get("dead_end", False)),
     "truncated": bool(final_info.get("truncated", False)),
-    "flooded_edges": int(flooded_edges),
+    "wet_edge_traversals": wet_edges,
+    "deep_edge_traversals": int(deep_edges),
+    "deep_traversal_episode": deep_edges > 0,
+    "total_revisits": int(final_info.get("total_revisits", 0)),
     "flood_day": bool(reset_info["is_flood_day"]),
   }
 def evaluate_scenarios(
@@ -215,11 +283,16 @@ def evaluate_scenarios(
   seed: int = 42,
 ) -> dict:
   """Evaluate fixed scenarios with masked random, static, and optional RL policies."""
-  records = [*scenarios.get("natural", []), *scenarios.get("flood_stratified", [])]
+  records = [
+    *scenarios.get("natural", []),
+    *scenarios.get("flood_stratified", []),
+    *scenarios.get("decision_relevant", []),
+  ]
   methods = {
     "masked_random": [],
     "static_shortest_path": [],
     "dynamic_replanning": [],
+    "oracle": [],
   }
   if model is not None:
     methods["rl_agent"] = []
@@ -232,6 +305,12 @@ def evaluate_scenarios(
     rl_base_env = rl_vec_env.venv.envs[0]
   for index, scenario in enumerate(records):
     rng = np.random.default_rng(seed + index)
+    oracle_env = _make_env(graph, env_ctor_args, config)
+    oracle_outcome = _evaluate_oracle(oracle_env, scenario)
+    oracle_env.close()
+    oracle_time = oracle_outcome["realized_travel_time"]
+    methods["oracle"].append(oracle_outcome)
+
     env = _make_env(graph, env_ctor_args, config)
     methods["masked_random"].append(
       _run_env_policy(
@@ -253,6 +332,12 @@ def evaluate_scenarios(
     if model is not None:
       methods["rl_agent"].append(
         _evaluate_rl_scenario(model, rl_vec_env, rl_base_env, scenario)
+      )
+    for outcomes in methods.values():
+      outcome = outcomes[-1]
+      outcome["oracle_realized_time"] = float(oracle_time)
+      outcome["regret_vs_oracle"] = max(
+        0.0, float(outcome.get("realized_travel_time", 0.0)) - float(oracle_time)
       )
   if model is not None:
     rl_vec_env.close()
@@ -282,6 +367,9 @@ def main(
     num_scenarios=int(evaluation.get("num_scenarios", 100)),
     num_flood_scenarios=int(evaluation.get("num_flood_scenarios", 30)),
     seed=int(evaluation.get("seed", 42)),
+    num_decision_relevant_scenarios=int(
+      evaluation.get("num_decision_relevant_scenarios", evaluation.get("num_flood_scenarios", 30))
+    ),
   )
   save_scenarios(scenarios)
   model = MaskablePPO.load(model_path) if model_path else None

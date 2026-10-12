@@ -579,6 +579,38 @@ before raising the cap.
 
 **Decision:** A revisit to a node is **not penalized and does not terminate** the episode if the agent has discovered strictly more known-flooded edges within the reveal radius since its last visit to that node. This implements "rational backtracking" — the agent learns that a flood was discovered and returns to the decision point to replan.
 
+---
+
+## 2026-10-12 - Graded flood severity and calibrated beliefs
+
+**Decision:** Replace binary flooded/dry outcomes and the flat flood toll with
+dry, shallow, and deep latent edge levels. Agents plan against Bayesian
+posteriors from precomputed noisy local readings; traversal is charged using
+the realized level. Flood levels and readings are fixed per episode and
+independent of the policy's action sequence.
+
+**Alternatives considered:** Blend prior risk with truth, expose binary truth
+within the reveal radius, or make every wet edge impassable.
+
+**Why this one:** The question is risk assessment: wet edges may be passable,
+and the correct choice depends on expected severity versus the detour cost.
+Bayesian noisy readings preserve calibrated uncertainty, and graded costs
+create a nontrivial wading-versus-detour tradeoff. Train/eval flood-day
+oversampling changes event frequency but not severity beliefs conditional on
+the observed day type and intensity.
+
+**Consequences:** Severity multipliers, deep penalties, and signal confusion
+matrices are synthetic assumptions; no edge-depth observations are available.
+Mid-episode severity upgrades default to zero because a static prior would
+otherwise become miscalibrated over time. Evaluation includes
+decision-relevant flood scenarios, a full-information oracle, and regret/tail
+metrics. PPO artifacts from the binary observation/reward interface must be
+retrained.
+
+**What would change my mind:** Field measurements of flood depth/travel speed,
+or calibration data showing that the current synthetic signal and severity
+model are materially inaccurate.
+
 **Implementation:**
 
 - `visit_counts` changed from `dict[node, int]` to `dict[node, tuple[int, int]]` storing `(visit_count, known_flooded_at_visit)`

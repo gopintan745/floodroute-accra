@@ -38,14 +38,19 @@ candidate list). Decide this early — it affects your SB3 policy choice.
 Log the decision in docs/design_decisions.md.
 """
 
-import gymnasium as gym
 import math
+import gymnasium as gym
 import networkx as nx
 import numpy as np
 import pandas as pd
 from gymnasium import spaces
 
-from src.common.cost_model import CostModelConfig, effective_travel_time
+from src.common.cost_model import (
+    CostModelConfig,
+    base_edge_time,
+    expected_cost,
+    realized_cost,
+)
 from src.env.graph_wrapper import GraphWrapper
 from src.env.hazard_simulator import HazardSimulator
 import json
@@ -80,7 +85,7 @@ class AccraRoutingEnv(gym.Env):
         self._origin_node = None
         self._step_count = 0
         self.visited_nodes: set = set()
-        self.visit_counts: dict = {}  # node -> (visit_count, known_flooded_at_visit)
+        self.visit_counts: dict = {}  # node -> (visit_count, expected-cost snapshot)
         self.total_revisits = 0
         self.revisit_mode = env_cfg.get("revisit_mode", "terminate")
         if self.revisit_mode not in {"terminate", "penalty"}:
@@ -111,7 +116,7 @@ class AccraRoutingEnv(gym.Env):
 
         node_dim = 2
         goal_relative_dim = 3  # distance_m, sin(bearing), cos(bearing)
-        edge_dim = 4
+        edge_dim = 8
         self.observation_space = spaces.Dict(
             {
                 "current_node_features": spaces.Box(
@@ -130,6 +135,12 @@ class AccraRoutingEnv(gym.Env):
                     low=-np.inf,
                     high=np.inf,
                     shape=(goal_relative_dim,),
+                    dtype=np.float32,
+                ),
+                "global_features": spaces.Box(
+                    low=np.array([0.0, 0.0], dtype=np.float32),
+                    high=np.array([1.0, 1.0], dtype=np.float32),
+                    shape=(2,),
                     dtype=np.float32,
                 ),
                 "local_edge_features": spaces.Box(
@@ -185,21 +196,36 @@ class AccraRoutingEnv(gym.Env):
         # as a terminal failure in step(), so expose a dummy choice only there.
         return mask if any(mask) else [True] * self.max_degree
 
-    def _local_known_flood_count(self, node) -> int:
-        """Count currently-known-flooded edges within reveal_radius_hops of the given node."""
-        if self.hazard_sim.current_position is None:
-            return 0
-        nearby_edges = self.graph_wrapper.neighbors_within_hops(node, self.hazard_sim.reveal_radius_hops)
-        return sum(1 for edge in nearby_edges if edge in self.hazard_sim.flooded_edges)
+    def _expected_edge_cost(self, edge) -> float:
+        u, v, k = edge
+        data = self.graph.edges[u, v, k]
+        traffic = self._lookup_traffic_multiplier(
+            str(data.get("highway_class", data.get("highway", "unclassified"))),
+            self.episode_context["hour"],
+            self.episode_context["is_weekend"],
+        )
+        edge_time = base_edge_time(
+            data.get("travel_time", 0.0),
+            traffic,
+            data.get("road_quality_score", 1.0),
+            self.cost_cfg.quality_penalty_weight,
+        )
+        return expected_cost(edge_time, self.hazard_sim.belief(*edge), self.cost_cfg)
 
-    def _record_visit(self, node) -> tuple[int, int]:
-        """Record a node visit and return (visit_count, known_flooded_at_visit)."""
-        prior_count, prior_known = self.visit_counts.get(node, (0, 0))
+    def _local_cost_snapshot(self, node) -> dict:
+        edges = self.graph_wrapper.neighbors_within_hops(
+            node, self.hazard_sim.reveal_radius_hops
+        )
+        return {edge: self._expected_edge_cost(edge) for edge in edges}
+
+    def _record_visit(self, node) -> tuple[int, dict]:
+        """Record visit count and local expected-cost beliefs for revisit checks."""
+        prior_count, _ = self.visit_counts.get(node, (0, {}))
         visit_count = prior_count + 1
-        known_flooded = self._local_known_flood_count(node)
-        self.visit_counts[node] = (visit_count, known_flooded)
+        snapshot = self._local_cost_snapshot(node)
+        self.visit_counts[node] = (visit_count, snapshot)
         self.visited_nodes.add(node)
-        return visit_count, known_flooded
+        return visit_count, snapshot
 
     def _revisit_penalty_for(self, revisit_number: int) -> float:
         """Return the escalating penalty for the episode-wide revisit number."""
@@ -245,47 +271,83 @@ class AccraRoutingEnv(gym.Env):
             dtype=np.float32,
         )
 
-    def _edge_feature_vector(self, edge, hour: int, is_weekend: bool) -> np.ndarray:
-        if edge is None:
-            return np.zeros(4, dtype=np.float32)
-        u, v, k = edge
-        edge_data = self.graph.get_edge_data(u, v, k)
-        if edge_data is None:
-            return np.zeros(4, dtype=np.float32)
-        flood_risk = float(edge_data.get("flood_risk", edge_data.get("flood_susceptibility", 0.0)))
-        if self.hazard_sim._episode_reset and self.hazard_sim.current_position is not None:
-            try:
-                if self.hazard_sim.is_flooded(u, v, k):
-                    flood_risk = 1.0
-                else:
-                    flood_risk = 0.0
-            except Exception:
-                pass
-        traffic_multiplier = self._lookup_traffic_multiplier(
-            str(edge_data.get("highway_class", edge_data.get("highway", "unclassified"))),
-            hour,
-            is_weekend,
-        )
-        road_quality = float(edge_data.get("road_quality_score", 1.0))
-        base_travel_time = float(edge_data.get("travel_time", 0.0))
-        return np.array(
-            [flood_risk, traffic_multiplier, road_quality, base_travel_time],
-            dtype=np.float32,
-        )
+    def _prior_cost_to_go(self) -> dict:
+        """Compute prior-expected downstream costs once for this episode."""
+        reverse_costs = nx.DiGraph()
+        for u, v, key, data in self.graph.edges(keys=True, data=True):
+            traffic = self._lookup_traffic_multiplier(
+                str(data.get("highway_class", data.get("highway", "unclassified"))),
+                self.episode_context["hour"],
+                self.episode_context["is_weekend"],
+            )
+            edge_time = base_edge_time(
+                data.get("travel_time", 0.0),
+                traffic,
+                data.get("road_quality_score", 1.0),
+                self.cost_cfg.quality_penalty_weight,
+            )
+            belief = self.hazard_sim.prior(u, v, key)
+            cost = expected_cost(edge_time, belief, self.cost_cfg)
+            if not reverse_costs.has_edge(v, u) or cost < reverse_costs[v][u]["weight"]:
+                reverse_costs.add_edge(v, u, weight=cost)
+        try:
+            return nx.single_source_dijkstra_path_length(
+                reverse_costs, self._destination_node, weight="weight"
+            )
+        except nx.NodeNotFound:
+            return {}
 
     def _build_observation(self):
         current_features = self._node_features(self._current_node)
         destination_features = self._node_features(self._destination_node)
-        edge_rows = []
+        edge_rows = np.zeros((self.max_degree, 8), dtype=np.float32)
+        cost_to_go = []
+        prior_cost_to_go = getattr(self, "_prior_cost_to_go_cache", {})
         for idx in range(self.max_degree):
             edge = self.graph_wrapper.action_to_edge(self._current_node, idx)
-            edge_rows.append(self._edge_feature_vector(edge, self.episode_context["hour"], self.episode_context["is_weekend"]))
-        local_edge_features = np.stack(edge_rows, axis=0)
+            if edge is None:
+                cost_to_go.append(None)
+                continue
+            u, v, k = edge
+            data = self.graph.edges[u, v, k]
+            belief = self.hazard_sim.belief(*edge)
+            traffic = self._lookup_traffic_multiplier(
+                str(data.get("highway_class", data.get("highway", "unclassified"))),
+                self.episode_context["hour"],
+                self.episode_context["is_weekend"],
+            )
+            quality = float(data.get("road_quality_score", 1.0))
+            base_time = float(data.get("travel_time", 0.0))
+            adjusted_base = base_edge_time(
+                base_time, traffic, quality, self.cost_cfg.quality_penalty_weight
+            )
+            via_cost = expected_cost(adjusted_base, belief, self.cost_cfg)
+            downstream_cost = float(prior_cost_to_go.get(v, float("inf")))
+            total_cost = via_cost + downstream_cost
+            edge_rows[idx] = [
+                *belief.tolist(), traffic, quality, base_time, total_cost, 0.0
+            ]
+            cost_to_go.append(total_cost)
+        finite_costs = [
+            value for value in cost_to_go
+            if value is not None and math.isfinite(value)
+        ]
+        best_cost = min(finite_costs, default=0.0)
+        worst_finite_cost = max(finite_costs, default=best_cost)
+        for idx, value in enumerate(cost_to_go):
+            if value is not None:
+                safe_value = value if math.isfinite(value) else worst_finite_cost + 1.0
+                edge_rows[idx, 6] = safe_value
+                edge_rows[idx, 7] = max(0.0, safe_value - best_cost)
         return {
             "current_node_features": current_features,
             "destination_node_features": destination_features,
             "goal_relative_features": self._goal_relative_features(),
-            "local_edge_features": local_edge_features,
+            "global_features": np.asarray(
+                [float(self.episode_context["is_flood_day"]), self.episode_context["intensity"]],
+                dtype=np.float32,
+            ),
+            "local_edge_features": edge_rows,
         }, {
             "origin": self._origin_node,
             "destination": self._destination_node,
@@ -293,6 +355,7 @@ class AccraRoutingEnv(gym.Env):
             "hour": self.episode_context["hour"],
             "is_weekend": self.episode_context["is_weekend"],
             "is_flood_day": self.episode_context["is_flood_day"],
+            "intensity": self.episode_context["intensity"],
         }
 
     def reset(self, *, seed=None, options=None):
@@ -326,22 +389,11 @@ class AccraRoutingEnv(gym.Env):
                 f"from origin {self._origin_node!r}"
             )
 
-        self.episode_context = self.hazard_sim.reset_episode()
-        for key in ("month", "hour", "is_weekend", "is_flood_day"):
-            if key in scenario:
-                self.episode_context[key] = scenario[key]
-        if "flooded_edges" in scenario:
-            self.hazard_sim.is_flood_day = bool(self.episode_context["is_flood_day"])
-            self.hazard_sim.flooded_edges = {
-                tuple(edge) for edge in scenario["flooded_edges"]
-            }
-        if "flood_events" in scenario:
-            self.hazard_sim.event_schedule = {
-                int(event["step"]): [tuple(edge) for edge in event["edges"]]
-                for event in scenario["flood_events"]
-            }
+        self.hazard_sim.set_seed(scenario.get("seed", seed))
+        self.episode_context = self.hazard_sim.reset_episode(scenario)
         self.hazard_sim.set_current_position(self._origin_node)
         self._current_node = self._origin_node
+        self._prior_cost_to_go_cache = self._prior_cost_to_go()
         self._step_count = 0
         self.visited_nodes = set()
         self.visit_counts = {}
@@ -377,11 +429,8 @@ class AccraRoutingEnv(gym.Env):
 
         self.hazard_sim.maybe_trigger_event(self._step_count)
         u, v, k = edge
-        is_flooded = False
-        try:
-            is_flooded = self.hazard_sim.is_flooded(u, v, k)
-        except Exception:
-            is_flooded = False
+        belief_before = self.hazard_sim.belief(u, v, k).copy()
+        level = self.hazard_sim.true_level(u, v, k)
 
         edge_data = self.graph.get_edge_data(u, v, k)
         base_travel_time = float(edge_data.get("travel_time", 0.0))
@@ -391,19 +440,14 @@ class AccraRoutingEnv(gym.Env):
             self.episode_context["hour"],
             self.episode_context["is_weekend"],
         )
-        realized_time = effective_travel_time(
-            base_travel_time=base_travel_time,
-            traffic_multiplier=traffic_multiplier,
-            flood_susceptibility=0.0,
-            road_quality_score=road_quality_score,
-            flood_weight=self.cost_cfg.flood_weight,
-            quality_penalty_weight=self.cost_cfg.quality_penalty_weight,
+        adjusted_base_time = base_edge_time(
+            base_travel_time,
+            traffic_multiplier,
+            road_quality_score,
+            self.cost_cfg.quality_penalty_weight,
         )
-        if is_flooded:
-            flood_penalty_minutes = float(
-                self.config.get("env", {}).get("flood_penalty", 50.0)
-            )
-            realized_time += flood_penalty_minutes * 60.0
+        realized_time = realized_cost(adjusted_base_time, level, self.cost_cfg)
+        is_flooded = level > 0
 
         reward = -realized_time - float(self.config.get("env", {}).get("step_penalty", 0.1))
 
@@ -412,15 +456,17 @@ class AccraRoutingEnv(gym.Env):
         self._step_count += 1
 
         terminated = self._current_node == self._destination_node
-        prior_count, prior_known = self.visit_counts.get(self._current_node, (0, 0))
+        prior_count, prior_snapshot = self.visit_counts.get(self._current_node, (0, {}))
         is_revisit = prior_count > 0
         revisit_penalty = 0.0
         revisit_failure = False
-        visit_count, known_flooded = self._record_visit(self._current_node)
-        
+        visit_count, current_snapshot = self._record_visit(self._current_node)
+
         if is_revisit:
-            current_known = self._local_known_flood_count(self._current_node)
-            informed_revisit = current_known > prior_known
+            informed_revisit = any(
+                abs(current_snapshot.get(edge, 0.0) - old_cost) > 1e-6
+                for edge, old_cost in prior_snapshot.items()
+            )
             if informed_revisit:
                 # Rational backtrack: new flood information discovered since last visit
                 # No penalty, no termination — treat as fresh step
@@ -451,6 +497,8 @@ class AccraRoutingEnv(gym.Env):
         info["reward"] = reward
         info["realized_travel_time"] = float(realized_time)
         info["is_flooded"] = bool(is_flooded)
+        info["level"] = int(level)
+        info["belief_before"] = belief_before.tolist()
         info["edge"] = [u, v, k]
         return obs, float(reward), bool(terminated), bool(truncated), info
 

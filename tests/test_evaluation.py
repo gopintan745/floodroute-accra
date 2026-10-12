@@ -28,9 +28,16 @@ def _config():
             "max_episode_steps": 10,
             "reveal_radius_hops": 1,
             "train_flood_day_rate": 1.0,
-            "mid_episode_event_base_rate": 0.0,
         },
-        "cost_model": {"flood_weight": 0.5, "quality_penalty_weight": 1.0},
+        "cost_model": {"quality_penalty_weight": 1.0},
+        "flood_model": {
+            "signal_mode": "exact",
+            "mid_episode_event_base_rate": 0.0,
+            "level_costs": {
+                "shallow": {"multiplier": 2.0, "penalty_s": 0.0},
+                "deep": {"multiplier": 3.0, "penalty_s": 600.0},
+            },
+        },
     }
 
 
@@ -77,12 +84,13 @@ def test_saved_scenario_replays_same_hazard_realization(tmp_path):
             _graph(), "missing-traffic.parquet", str(climatology), _config(), mode="eval"
         )
         _, info = env.reset(seed=seed, options={"scenario": scenario})
-        return info, sorted(env.hazard_sim.flooded_edges, key=str)
+        return info, dict(env.hazard_sim.true_levels), dict(env.hazard_sim.readings)
 
-    first_info, first_edges = reset_with(1)
-    second_info, second_edges = reset_with(999)
+    first_info, first_levels, first_readings = reset_with(1)
+    second_info, second_levels, second_readings = reset_with(999)
     assert first_info == second_info
-    assert first_edges == second_edges
+    assert first_levels == second_levels
+    assert first_readings == second_readings
 
 
 def test_evaluate_scenarios_returns_comparable_method_outcomes(tmp_path):
@@ -111,6 +119,7 @@ def test_evaluate_scenarios_returns_comparable_method_outcomes(tmp_path):
         "masked_random",
         "static_shortest_path",
         "dynamic_replanning",
+        "oracle",
     }
     for outcomes in results["methods"].values():
         assert len(outcomes) == 1
@@ -120,18 +129,21 @@ def test_evaluate_scenarios_returns_comparable_method_outcomes(tmp_path):
 def test_metrics_and_comparison_summarize_route_results(tmp_path):
     realization = {
         "edges": {
-            "('a', 'b', 0)": {"travel_time": 2.0, "traffic_multiplier": 1.5},
-            "('b', 'c', 0)": {"travel_time": 3.0, "is_flooded": True, "flood_penalty": 10.0},
+            "('a', 'b', 0)": {"travel_time": 2.0, "traffic_multiplier": 1.5, "level": 0},
+            "('b', 'c', 0)": {
+                "travel_time": 3.0, "traffic_multiplier": 1.0, "level": 2,
+                "deep_multiplier": 3.0, "deep_penalty_s": 600.0,
+            },
         }
     }
     route = [("a", "b", 0), ("b", "c", 0)]
 
-    assert travel_time(route, realization) == 16.0
+    assert travel_time(route, realization) == 612.0
     assert hit_blocked_edge(route, realization)
 
     results = [
-        {"actual_travel_time": 4.0, "flooded_edges": 0, "success": True, "reward": 96.0},
-        {"actual_travel_time": 8.0, "flooded_edges": 1, "success": True, "reward": 92.0},
+        {"actual_travel_time": 4.0, "wet_edge_traversals": 0, "success": True, "reward": 96.0, "regret_vs_oracle": 1.0},
+        {"actual_travel_time": 8.0, "wet_edge_traversals": 1, "deep_edge_traversals": 1, "total_revisits": 2, "success": True, "reward": 92.0, "regret_vs_oracle": 4.0},
     ]
     summary = summarize(results)
     assert summary["mean_travel_time"] == 6.0
@@ -140,6 +152,10 @@ def test_metrics_and_comparison_summarize_route_results(tmp_path):
     assert summary["flooded_edge_rate"] == 0.5
     assert summary["blocked_edge_rate"] == 0.0
     assert summary["mean_reward"] == 94.0
+    assert summary["p95_travel_time"] == 7.8
+    assert summary["mean_regret_vs_oracle"] == 2.5
+    assert summary["mean_deep_edge_traversals"] == 0.5
+    assert summary["mean_total_revisits"] == 1.0
 
     comparison = compare_results({"rl_agent": results})
     assert comparison["methods"]["rl_agent"]["episodes"] == 2
